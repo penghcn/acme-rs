@@ -1,0 +1,31 @@
+## --------------------------------------------------------------------
+## Refresh .gitignore file
+## git rm -r --cached . && git add . && git commit -m 'update .gitignore'
+## --------------------------------------------------------------------
+
+.svn/
+*.svn
+
+## MacOS
+.DS_Store
+
+## Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+
+*.bak
+*.temp
+*.tmp
+
+## Logs File
+*.log
+logs/
+*/logs/
+
+## Rust
+/target
+.vscode
+.zed
+Cargo.lock
