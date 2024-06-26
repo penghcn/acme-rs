@@ -781,19 +781,6 @@ async fn _chall_domain(
 	Ok((o, or_))
 }
 
-// fn to_json<T>(map: &T) -> String  {
-//     serde_json::to_string(&json!(map)).unwrap()
-// }
-fn _hac256(s: &[u8]) -> String {
-	type HmacSha256 = Hmac<Sha256>;
-	let mut mac = HmacSha256::new_from_slice(
-		b"RCqxcFp4oJicpNbS1JIBFQVp2tp1t9VE3ClWDxVAUe7OVWAs7TGy8Tjej7UN7pQeeeSYgqSsIpfysrFB8vTXGQ",
-	)
-	.expect("HMAC can take key of any size");
-	mac.update(b"a");
-	URL_SAFE.encode(s).replace("=", "")
-}
-
 fn _base64_hmac256(key: &str, s: &str) -> String {
 	type HmacSha256 = Hmac<Sha256>;
 	let mut mac = HmacSha256::new_from_slice(&URL_SAFE.decode(_durl_base64(key)).unwrap()).expect("...");
@@ -829,8 +816,6 @@ fn _base64_sha256(p: &str) -> String {
 	println!("sha2 sha256 base64: {}", b64_hash);
 	b64_hash
 }
-
-fn _gen_ecc() {}
 
 fn _gen_key_by_cmd_openssl(account_key_path: &str, alg: &Alg) -> Output {
 	let a: Vec<&str> = match alg {
