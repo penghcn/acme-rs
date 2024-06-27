@@ -26,16 +26,16 @@ const TYPE_HTTP: &str = "http-01";
 //const TYPE_ALPN: &str = "tls-alpn-01";
 const STATUS_OK: &str = "valid"; //valid, pending, invalid
 
-const TIP_REQUIRED_EMAIL: &str = "Required email, like add param: email=a@a.org";
+const TIP_REQUIRED_EMAIL: &str = "Required email, add param like: email=a@a.org";
 
-// rm -rf /Users/pengh/.acme.sh/*
-// 参考 sh ./a.sh --issue -d pengh.cn -d www.pengh.cn -d cp.pengh.cn -w ~/www/pengh.cn  --debug 3 --keylength ec-384 --register-account -m my_tmp_email@163.com --server zerossl
+// rm -rf ~/.acme.sh/*
+// 参考 sh ./a.sh --issue -d ai8.rs -d www.ai8.rs -d cp.ai8.rs -w ~/www/ai8.rs  --debug 3 --keylength ec-384 --register-account -m my_tmp_email@163.com --server zerossl
 
 #[tokio::main]
 async fn main() {
 	// 获取所有的命令行参数，跳过第一个参数（程序路径）
-	// cargo test --test acme -- _acme --exact --show-output  dns=pengh.cn,www.pengh.cn dir=/Users/pengh/www/pengh/docker_conf/nginx/ssl/le/pengh.cn email=a@a.org ca=z
-	// cargo run -- --exact --show-output  dns=pengh.cn,www.pengh.cn dir=/Users/pengh/www/pengh/docker_conf/nginx/ssl/le/pengh.cn email=a@a.org ca=z
+	// cargo test --test acme -- _acme --exact --show-output  dns=ai8.rs,www.ai8.rs dir=~/www/pengh/docker_conf/nginx/ssl/le/ai8.rs email=a@a.org ca=z
+	// cargo run -- dns=ai8.rs,www.ai8.rs dir=~/www/pengh/docker_conf/nginx/ssl/le/ai8.rs email=a@a.org ca=z
 
 	let args: Vec<String> = std::env::args().skip(1).collect();
 	dbg!(&args);
@@ -55,10 +55,10 @@ async fn _acme2(cfg: AcmeCfg) -> Result<(), AcmeError> {
 	// 0 初始化参数，获取或者默认值
 	println!("Step1 Init Params: {:?}", cfg);
 	let dns_ = cfg.dns;
-	//let account_key_path_ = "/Users/pengh/www/pengh/docker_conf/nginx/ssl/le/acct.key";
+	//let account_key_path_ = "~/www/pengh/docker_conf/nginx/ssl/le/acct.key";
 	let account_key_path_ = cfg.account_key_path.as_str();
 	let account_key_alg_ = cfg.alg;
-	//let file_path = "/Users/pengh/.acme.sh/ca/acme-v02.api.letsencrypt.org/directory/account.key";
+	//let file_path = "~/.acme.sh/ca/acme-v02.api.letsencrypt.org/directory/account.key";
 	let domain_acme_dir_ = cfg.acme_dir;
 
 	// 1 init获取接口  /directory
@@ -167,6 +167,7 @@ impl std::fmt::Debug for AcmeCa {
 impl AcmeCa {
 	fn new(ca_type: &str) -> Self {
 		match ca_type {
+			CA_DEFAULT_LE => AcmeCa::LetsEncrypt(Box::new(LetsEncrypt)),
 			"z" | "zero" => AcmeCa::ZeroSSL(Box::new(ZeroSSL)),
 			"b" | "buypass" => AcmeCa::BuyPass(Box::new(BuyPass)),
 			"g" | "google" => AcmeCa::Google(Box::new(Google)),
@@ -289,7 +290,7 @@ enum Alg {
 impl Alg {
 	fn new(alg: &str) -> Self {
 		match alg.to_uppercase().as_str() {
-			"EC3" | "ECC3" => Alg::ECC3,
+			ALG_DEFAULT_EC3 | "ECC3" => Alg::ECC3,
 			"EC5" | "ECC5" => Alg::ECC5,
 			"EC2" | "ECC2" => Alg::ECC2,
 			"RSA4" => Alg::RSA4,
@@ -846,7 +847,7 @@ fn _sign_by_cmd_openssl(account_key_path: &str, plain: &str, is_ecc: bool, alg_l
 	let sha = format!("-sha{}", &alg_len);
 	//let rsa :&[&str]= &["dgst", &sha, "-sign", &file_path];
 	//let ecc :&[&str]= &["dgst", &sha, "-sign", &file_path, "|", "openssl", "asn1parse", "-inform", "DER"];
-	// echo "" | openssl dgst -sha256 -sign /Users/pengh/.acme.sh/ca/acme-v02.api.letsencrypt.org/directory/account.key
+	// echo "" | openssl dgst -sha256 -sign ~/.acme.sh/ca/acme-v02.api.letsencrypt.org/directory/account.key
 	let mut child = Command::new("openssl")
 		.args(&["dgst", &sha, "-sign", &account_key_path])
 		.stdin(Stdio::piped())
