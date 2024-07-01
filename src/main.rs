@@ -824,11 +824,12 @@ async fn _write_to_challenges(token: String, domain: &str, acme_dir: &str, thumb
 	let token = token.replace(r"[^A-Za-z0-9_\-]", "_");
 	let key_authorization = format!("{0}.{1}", token, thumbprint);
 	let well_known_path = format!("{}{}{}", acme_dir, LACATION_CHALLENGES, token);
-	let _ = File::create(&well_known_path)
-		.map_err(|_e| AcmeError::Tip(format!("Create file failed: {}. {}", well_known_path, _e.to_string())))?
-		.write(key_authorization.as_bytes())
-		.map_err(|_| AcmeError::Tip(format!("Write failed: {}", well_known_path)));
-	println!("Successfully. Write to {}:{}", well_known_path, key_authorization);
+	// let _ = File::create(&well_known_path)
+	// 	.map_err(|_e| AcmeError::Tip(format!("Create file failed: {}. {}", well_known_path, _e.to_string())))?
+	// 	.write(key_authorization.as_bytes())
+	// 	.map_err(|_| AcmeError::Tip(format!("Write failed: {}", well_known_path)));
+	// println!("Successfully. Write to {}:{}", well_known_path, key_authorization);
+	let _ = _write_to_file(&well_known_path, &key_authorization);
 	let wellknown_url = format!("http://{0}/.well-known/acme-challenge/{1}", domain, token);
 	let ka = _http_json(&wellknown_url, None, Method::GET).await?.text().await?; // 自己先验一下
 	if ka != key_authorization {
@@ -933,7 +934,7 @@ fn _gen_csr_by_cmd_openssl(acme_dir: &str, account_key_alg_: Alg, dns: &Vec<Stri
 
 	let openssl_cnf = fs::read_to_string("/etc/ssl/openssl.cnf")?;
 	let dns_san = dns.iter().map(|_d| format!("DNS:{}", _d)).collect::<Vec<String>>().join(",");
-	let _ = _write_to_file(&tmp, format!("{}\n[SAN]\nsubjectAltName={}", openssl_cnf, dns_san));
+	let _ = _write_to_file(&tmp, &format!("{}\n[SAN]\nsubjectAltName={}", openssl_cnf, dns_san));
 
 	let a = [
 		"req",
@@ -961,7 +962,7 @@ fn _gen_csr_by_cmd_openssl(acme_dir: &str, account_key_alg_: Alg, dns: &Vec<Stri
 }
 
 // 覆盖写入
-fn _write_to_file(file_path: &str, s: String) -> Result<(), AcmeError> {
+fn _write_to_file(file_path: &str, s: &str) -> Result<(), AcmeError> {
 	let _ = File::create(&file_path)
 		.map_err(|_e| AcmeError::Tip(format!("Create file failed: {}. {}", file_path, _e.to_string())))?
 		.write(s.as_bytes())
@@ -1070,5 +1071,5 @@ fn _regx(out: &str, reg: &str, need_rep: bool) -> String {
 #[test]
 fn t() {
 	let dir = "/Users/pengh/www/pengh/docker_conf/nginx/ssl/le/pengh.cn/.acme";
-	let _ = _gen_csr_by_cmd_openssl(dir, Alg::new("ec3"), vec!["a.rs".to_string(), "www.a.rs".to_string()]);
+	let _ = _gen_csr_by_cmd_openssl(dir, Alg::new("ec3"), &vec!["a.rs".to_string(), "www.a.rs".to_string()]);
 }
