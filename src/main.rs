@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use sha2::Sha256;
 use std::collections::HashMap;
+use std::fs;
 use std::fs::File;
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
@@ -17,6 +18,7 @@ const _URL_ZERO_EAB: &str = "https://api.zerossl.com/acme/eab-credentials-email"
 const URL_BUYPASS: &str = "https://api.buypass.com/acme/directory"; //注意大陆境内，该链接无法访问
 const URL_GOOGLE: &str = "https://dv.acme-v02.api.pki.goog/directory"; //注意大陆境内，该链接无法访问
 
+const LACATION_CHALLENGES: &str = "/challenges/";
 const CA_DEFAULT_LE: &str = "le";
 const ALG_DEFAULT_EC3: &str = "EC3";
 
@@ -26,7 +28,11 @@ const TYPE_HTTP: &str = "http-01";
 //const TYPE_ALPN: &str = "tls-alpn-01";
 const STATUS_OK: &str = "valid"; //valid, pending, invalid
 
+const MAX_TRY: u8 = 10; //
+const SLEEP_SECS: u64 = 2; //
+
 const TIP_REQUIRED_EMAIL: &str = "Required email, add param like: email=a@a.org";
+const TIP_MAX_TRY: &str = "Maximum attempts reached, exiting.";
 
 // rm -rf ~/.acme.sh/*
 // 参考 sh ./a.sh --issue -d ai8.rs -d www.ai8.rs -d cp.ai8.rs -w ~/www/ai8.rs  --debug 3 --keylength ec-384 --register-account -m my_tmp_email@163.com --server zerossl
@@ -46,12 +52,12 @@ async fn main() {
 		return; //中断
 	}
 
-	if let Err(_e) = _acme2(_cfg.unwrap()).await {
+	if let Err(_e) = _acme_run(_cfg.unwrap()).await {
 		println!("{:?}", _e);
 	}
 }
 
-async fn _acme2(cfg: AcmeCfg) -> Result<(), AcmeError> {
+async fn _acme_run(cfg: AcmeCfg) -> Result<(), AcmeError> {
 	// 0 初始化参数，获取或者默认值
 	println!("Step1 Init Params: {:?}", cfg);
 	let dns_ = cfg.dns;
@@ -81,6 +87,7 @@ async fn _acme2(cfg: AcmeCfg) -> Result<(), AcmeError> {
 
 	// 3.1 先获取或生成 account.key, 通过参数指定(参考enum Alg)， 目前支持 rsa2048,rsa4096,prime256v1,prime384v1,prime512v1
 	let _ = _gen_key_by_cmd_openssl(&account_key_path_, &account_key_alg_);
+	println!("Successfully. Gen account key: {}", &account_key_path_);
 	let jwk = _print_key_by_cmd_openssl(&account_key_path_, account_key_alg_.is_ecc());
 	let alg = jwk.alg();
 	let thumbprint = _base64_sha256(&jwk.to_string());
@@ -105,9 +112,25 @@ async fn _acme2(cfg: AcmeCfg) -> Result<(), AcmeError> {
 		let (_domain, _challenges) = (_order_res.identifier.unwrap().value, _order_res.challenges.unwrap());
 		let _chall = _challenges.into_iter().filter(|c| c._type == TYPE_HTTP).next().unwrap();
 
-		_write_to_well_known(_chall.token, &_domain, &domain_acme_dir_, &thumbprint).await?;
-		let (_nonce, _ch) = _chall_domain(_chall.url, _mut_nonce_, &account_key_path_, &alg, &kid).await?;
-		_mut_nonce_ = _nonce;
+		let _well_known_path = _write_to_challenges(_chall.token, &_domain, &domain_acme_dir_, &thumbprint).await?;
+		//轮询
+		let mut attempts: u8 = 0;
+		loop {
+			let (_nonce, _ok) = _chall_domain(&_chall.url, _mut_nonce_, &account_key_path_, &alg, &kid).await?;
+			_mut_nonce_ = _nonce;
+			if _ok {
+				println!("Successful.{}", &_chall.url);
+				break;
+			}
+			attempts += 1;
+
+			if attempts == MAX_TRY {
+				return Err(AcmeError::Tip(TIP_MAX_TRY.to_string()));
+			}
+			std::thread::sleep(std::time::Duration::from_secs(SLEEP_SECS));
+		}
+		let _ = fs::remove_file(&_well_known_path)
+			.map_err(|_| AcmeError::Tip(format!("Remove failed: {}", _well_known_path)));
 	}
 	Ok(())
 }
@@ -281,26 +304,26 @@ enum Method {
 
 #[derive(Debug)]
 enum Alg {
-	RSA2,
-	RSA4,
-	ECC2,
-	ECC3,
-	ECC5,
+	RSA2048,
+	RSA4096,
+	ECC256,
+	ECC384,
+	ECC521,
 }
 impl Alg {
 	fn new(alg: &str) -> Self {
 		match alg.to_uppercase().as_str() {
-			ALG_DEFAULT_EC3 | "ECC3" => Alg::ECC3,
-			"EC5" | "ECC5" => Alg::ECC5,
-			"EC2" | "ECC2" => Alg::ECC2,
-			"RSA4" => Alg::RSA4,
-			"RSA2" => Alg::RSA2,
-			_ => Alg::ECC3, //default
+			ALG_DEFAULT_EC3 | "ECC3" => Alg::ECC384,
+			"EC5" | "ECC5" => Alg::ECC521,
+			"EC2" | "ECC2" => Alg::ECC256,
+			"RSA4" => Alg::RSA4096,
+			"RSA2" => Alg::RSA2048,
+			_ => Alg::ECC384, //default
 		}
 	}
 
 	fn is_ecc(&self) -> bool {
-		matches!(self, Alg::ECC2 | Alg::ECC3 | Alg::ECC5)
+		matches!(self, Alg::ECC256 | Alg::ECC384 | Alg::ECC521)
 	}
 }
 #[derive(Deserialize, Debug)]
@@ -321,7 +344,7 @@ struct DirectoryMeta {
 	external_account_required: Option<bool>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize)]
 struct Eab {
 	success: bool,
 	error: Option<EabError>,
@@ -329,7 +352,7 @@ struct Eab {
 	eab_hmac_key: Option<String>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize)]
 struct EabError {
 	code: u32,
 	#[serde(rename(deserialize = "type"))]
@@ -577,11 +600,11 @@ impl SigBody {
 #[derive(Deserialize, Debug)]
 struct OrderRes {
 	identifier: Option<Identifier>,
-	status: String,
-	expires: String,
+	//status: String,
+	//expires: String,
 	authorizations: Option<Vec<String>>,
 	challenges: Option<Vec<OrderResChall>>,
-	finalize: Option<String>,
+	//finalize: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -744,29 +767,35 @@ async fn _auth_domain(
 	Ok((o, or_))
 }
 
-async fn _write_to_well_known(token: String, domain: &str, acme_dir: &str, thumbprint: &str) -> Result<(), AcmeError> {
+async fn _write_to_challenges(
+	token: String,
+	domain: &str,
+	acme_dir: &str,
+	thumbprint: &str,
+) -> Result<String, AcmeError> {
 	let token = token.replace(r"[^A-Za-z0-9_\-]", "_");
 	let key_authorization = format!("{0}.{1}", token, thumbprint);
-	let well_known_path = format!("{}/{}", acme_dir, token);
+	let well_known_path = format!("{}{}{}", acme_dir, LACATION_CHALLENGES, token);
 	let _ = File::create(&well_known_path)
 		.map_err(|_e| AcmeError::Tip(format!("Create file failed: {}. {}", well_known_path, _e.to_string())))?
 		.write(key_authorization.as_bytes())
 		.map_err(|_| AcmeError::Tip(format!("Write failed: {}", well_known_path)));
+	println!("Successfully. Write to {}:{}", well_known_path, key_authorization);
 	let wellknown_url = format!("http://{0}/.well-known/acme-challenge/{1}", domain, token);
 	let ka = _http_json(&wellknown_url, None, Method::GET).await?.text().await?; // 自己先验一下
 	if ka != key_authorization {
 		return Err(AcmeError::Tip(format!("Check failed: {}", wellknown_url)));
 	}
-	Ok(())
+	Ok(well_known_path)
 }
 
 async fn _chall_domain(
-	url: String,
+	url: &str,
 	nonce: String,
 	file_path: &str,
 	alg: &str,
 	kid: &str,
-) -> Result<(String, OrderResChall), AcmeError> {
+) -> Result<(String, bool), AcmeError> {
 	//protected='{"nonce": "I4RLVp830DhlbzGGoGqxd90G_wxxqbI25XFqmD1fxqaPMj4H_Os", "url": "https://acme-v02.api.letsencrypt.org/acme/chall-v3/366261494887/3xX-Gg", "alg": "ES256", "kid": "https://acme-v02.api.letsencrypt.org/acme/acct/1792176437"}'
 	let protected = Protected::from_kid(&url, nonce, alg, kid);
 	let sig_body = SigBody::from(Payload::_new_chall(), protected, file_path);
@@ -776,10 +805,7 @@ async fn _chall_domain(
 	let res_str = res.text().await?;
 
 	let or_: OrderResChall = serde_json::from_str(&res_str).unwrap();
-	if or_.status == STATUS_OK {
-		println!("Successful.")
-	}
-	Ok((o, or_))
+	Ok((o, or_.status == STATUS_OK))
 }
 
 fn _base64_hmac256(key: &str, s: &str) -> String {
@@ -814,17 +840,17 @@ fn _base64_sha256(p: &str) -> String {
 	let hash = hasher.finalize();
 
 	let b64_hash = _base64(&hash);
-	println!("sha2 sha256 base64: {}", b64_hash);
+	//println!("sha2 sha256 base64: {}", b64_hash);
 	b64_hash
 }
 
 fn _gen_key_by_cmd_openssl(account_key_path: &str, alg: &Alg) -> Output {
 	let a: Vec<&str> = match alg {
-		Alg::RSA2 => vec!["genrsa", "-out", account_key_path, "2048"],
-		Alg::RSA4 => vec!["genrsa", "-out", account_key_path, "4096"],
-		Alg::ECC2 => vec!["ecparam", "-name", "prime256v1", "-genkey", "-out", account_key_path],
-		Alg::ECC3 => vec!["ecparam", "-name", "secp384r1", "-genkey", "-out", account_key_path],
-		Alg::ECC5 => vec!["ecparam", "-name", "secp521r1", "-genkey", "-out", account_key_path],
+		Alg::RSA2048 => vec!["genrsa", "-out", account_key_path, "2048"],
+		Alg::RSA4096 => vec!["genrsa", "-out", account_key_path, "4096"],
+		Alg::ECC256 => vec!["ecparam", "-name", "prime256v1", "-genkey", "-out", account_key_path],
+		Alg::ECC384 => vec!["ecparam", "-name", "secp384r1", "-genkey", "-out", account_key_path],
+		Alg::ECC521 => vec!["ecparam", "-name", "secp521r1", "-genkey", "-out", account_key_path],
 	};
 
 	let out = Command::new("openssl").args(a).output().unwrap();
