@@ -2,7 +2,6 @@
 ## Refresh .gitignore file
 ## git rm -r --cached . && git add . && git commit -m 'update .gitignore'
 ## --------------------------------------------------------------------
-
 .svn/
 *.svn
 
@@ -13,7 +12,6 @@
 Thumbs.db
 ehthumbs.db
 Desktop.ini
-
 
 *.bak
 *.temp
