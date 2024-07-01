@@ -1,6 +1,9 @@
 ## Usage
 1)  The default CA (Certificate Authority) is Let's Encrypt, and the default algorithm is EC3, which is secp384r1.
 ```
+git clone https://github.com/penghcn/acme-rs.git
+cd acme-rs/
+
 cargo run --  dns=ai8.rs,www.ai8.rs dir=~/www/ai8.rs
 ```
 
@@ -43,4 +46,7 @@ Recommended SSL ciphers.
     ssl_ciphers ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384:DHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-SHA384:ECDHE-RSA-AES128-SHA256:ECDHE-RSA-AES256-SHA:ECDHE-RSA-AES128-SHA:DHE-RSA-AES256-SHA256:DHE-RSA-AES128-SHA256:DHE-RSA-AES256-SHA:DHE-RSA-AES128-SHA:ECDHE-RSA-DES-CBC3-SHA:EDH-RSA-DES-CBC3-SHA:AES256-GCM-SHA384:AES128-GCM-SHA256:AES256-SHA256:AES128-SHA256:AES256-SHA:AES128-SHA:DES-CBC3-SHA:HIGH:!aNULL:!eNULL:!EXPORT:!DES:!MD5:!PSK:!RC4;
 ```
 
-5) Install rust. [Click link.](https://www.rust-lang.org/tools/install)
+5) Install rust. [Official link.](https://www.rust-lang.org/tools/install)
+```
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
