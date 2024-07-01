@@ -28,7 +28,7 @@ const TYPE_HTTP: &str = "http-01";
 //const TYPE_ALPN: &str = "tls-alpn-01";
 const STATUS_OK: &str = "valid"; //valid, pending, invalid
 
-const MAX_TRY: u8 = 10; //
+const MAX_TRY: u8 = 5; //
 const SLEEP_SECS: u64 = 2; //
 
 const TIP_REQUIRED_EMAIL: &str = "Required email, add param like: email=a@a.org";
@@ -61,11 +61,6 @@ async fn _acme_run(cfg: AcmeCfg) -> Result<(), AcmeError> {
 	// 0 初始化参数，获取或者默认值
 	println!("Step1 Init Params: {:?}", cfg);
 	let dns_ = cfg.dns;
-	//let account_key_path_ = "~/www/pengh/docker_conf/nginx/ssl/le/acct.key";
-	let account_key_path_ = cfg.account_key_path.as_str();
-	let account_key_alg_ = cfg.alg;
-	//let file_path = "~/.acme.sh/ca/acme-v02.api.letsencrypt.org/directory/account.key";
-	let domain_acme_dir_ = cfg.acme_dir;
 
 	// 1 init获取接口  /directory
 	let _dir = _directory(cfg.ca.directory_url()).await?;
@@ -86,9 +81,14 @@ async fn _acme_run(cfg: AcmeCfg) -> Result<(), AcmeError> {
 	// 3
 
 	// 3.1 先获取或生成 account.key, 通过参数指定(参考enum Alg)， 目前支持 rsa2048,rsa4096,prime256v1,prime384v1,prime512v1
-	let _ = _gen_key_by_cmd_openssl(&account_key_path_, &account_key_alg_);
+	//let account_key_path_ = "~/www/pengh/docker_conf/nginx/ssl/le/acct.key";
+	let account_key_path_ = cfg.account_key_path.as_str();
+	let alg_ = cfg.alg;
+	//let file_path = "~/.acme.sh/ca/acme-v02.api.letsencrypt.org/directory/account.key";
+	let _ = _gen_key_by_cmd_openssl(&account_key_path_, &alg_);
 	println!("Successfully. Gen account key: {}", &account_key_path_);
-	let jwk = _print_key_by_cmd_openssl(&account_key_path_, account_key_alg_.is_ecc());
+
+	let jwk = _print_key_by_cmd_openssl(&account_key_path_, alg_.is_ecc());
 	let alg = jwk.alg();
 	let thumbprint = _base64_sha256(&jwk.to_string());
 	println!("\njwk: {:?}, thumbprint:{}", jwk, thumbprint);
@@ -101,7 +101,7 @@ async fn _acme_run(cfg: AcmeCfg) -> Result<(), AcmeError> {
 
 	// 4 下单 -> 验证每个域名 -> 验证每个域名
 	// 4.1 下单 /acme/new-order
-	let (_nonce, _order_res) = _new_order(_dir.new_order, _nonce, &account_key_path_, &alg, &kid, dns_).await?;
+	let (_nonce, _location, _order_res) = _new_order(&_dir.new_order, _nonce, &account_key_path_, &alg, &kid, &dns_).await?;
 
 	// 4.2 验证每个域名
 	let mut _mut_nonce_ = _nonce;
@@ -112,7 +112,7 @@ async fn _acme_run(cfg: AcmeCfg) -> Result<(), AcmeError> {
 		let (_domain, _challenges) = (_order_res.identifier.unwrap().value, _order_res.challenges.unwrap());
 		let _chall = _challenges.into_iter().filter(|c| c._type == TYPE_HTTP).next().unwrap();
 
-		let _well_known_path = _write_to_challenges(_chall.token, &_domain, &domain_acme_dir_, &thumbprint).await?;
+		let _well_known_path = _write_to_challenges(_chall.token, &_domain, &cfg.acme_root, &thumbprint).await?;
 		//轮询
 		let mut attempts: u8 = 0;
 		loop {
@@ -129,9 +129,35 @@ async fn _acme_run(cfg: AcmeCfg) -> Result<(), AcmeError> {
 			}
 			std::thread::sleep(std::time::Duration::from_secs(SLEEP_SECS));
 		}
-		let _ = fs::remove_file(&_well_known_path)
-			.map_err(|_| AcmeError::Tip(format!("Remove failed: {}", _well_known_path)));
+		let _ = fs::remove_file(&_well_known_path).map_err(|_| AcmeError::Tip(format!("Remove failed: {}", _well_known_path)));
 	}
+
+	// 4.3 finalize csr
+	let _url = &_order_res.finalize.unwrap();
+	let _csr = _gen_csr_by_cmd_openssl(&cfg.acme_dir, alg_, &dns_)?;
+	let _nonce = _finalize_csr(_url, _mut_nonce_, &account_key_path_, &alg, &kid, _csr).await?;
+	_mut_nonce_ = _nonce;
+
+	//轮询
+	let mut attempts: u8 = 0;
+	loop {
+		let (_nonce, _, _order_res) = _new_order(&_location, _mut_nonce_, &account_key_path_, &alg, &kid, &dns_).await?;
+		_mut_nonce_ = _nonce;
+		if _order_res.status == STATUS_OK {
+			println!("Successful.{}", &_location);
+			// 4.4 download certificate
+			_down_certificate(&_order_res.certificate.unwrap(), _mut_nonce_, &account_key_path_, &alg, &kid).await?;
+			break;
+		}
+		attempts += 1;
+
+		if attempts == MAX_TRY {
+			return Err(AcmeError::Tip(TIP_MAX_TRY.to_string()));
+		}
+		std::thread::sleep(std::time::Duration::from_secs(SLEEP_SECS));
+	}
+
+	// 4.4 download certificate
 	Ok(())
 }
 
@@ -214,8 +240,9 @@ impl AcmeCa {
 
 #[derive(Debug)]
 struct AcmeCfg {
-	dns: String,
+	dns: Vec<String>,
 	email: Option<String>,
+	acme_root: String,
 	acme_dir: String,
 	ca: AcmeCa,
 	account_key_path: String,
@@ -236,17 +263,20 @@ impl AcmeCfg {
 		let dns = map
 			.get("dns")
 			.ok_or_else(|| AcmeError::Tip("Missing parameter 'dns'".to_string()))?
-			.to_string();
-		let acme_dir = map
+			.split(",")
+			.map(|s| s.to_string())
+			.collect();
+		let acme_root = map
 			.get("dir")
 			.ok_or_else(|| AcmeError::Tip("Missing parameter 'dir'".to_string()))?
 			.to_string();
 
-		if !std::path::Path::new(&acme_dir).is_dir() {
-			return Err(AcmeError::Tip(format!("The directory does not exist: {}", acme_dir)));
+		if !std::path::Path::new(&acme_root).is_dir() {
+			return Err(AcmeError::Tip(format!("The directory does not exist: {}", acme_root)));
 		}
 
-		let account_key_path = format!("{}/.acme/account.key", acme_dir);
+		let acme_dir = format!("{}/.acme", acme_root);
+		let account_key_path = format!("{}/account.key", acme_dir);
 		if let Some(parent) = std::path::Path::new(&account_key_path).parent() {
 			if !parent.exists() {
 				// 递归创建父目录
@@ -261,6 +291,7 @@ impl AcmeCfg {
 
 		Ok(AcmeCfg {
 			dns,
+			acme_root,
 			acme_dir,
 			email,
 			ca,
@@ -415,11 +446,7 @@ impl Jwk {
 			let (x, y) = (_base64_hex(&pub_[2..offset]), _base64_hex(&pub_[offset..]));
 			Self::_Ecc(JwkEcc::new(crv, x, y))
 		} else {
-			let pub_ = _regx(
-				&out,
-				r"modulus:[\s]+?00:([a-f0-9\:\s]+?)\npublicExponent: ([0-9]+)",
-				true,
-			);
+			let pub_ = _regx(&out, r"modulus:[\s]+?00:([a-f0-9\:\s]+?)\npublicExponent: ([0-9]+)", true);
 			let e = _regx(&out, r"0x([A-Fa-f0-9]+)", false);
 			let e = if e.len() % 2 == 0 { e } else { format!("0{}", e) };
 			println!("{}: {}", &e, &pub_);
@@ -509,6 +536,8 @@ struct Payload {
 	identifiers: Option<Vec<Identifier>>,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	terms_of_service_agreed: Option<bool>,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	csr: Option<String>,
 }
 
 impl Payload {
@@ -518,23 +547,26 @@ impl Payload {
 			external_account_binding: None,
 			contact: None,
 			terms_of_service_agreed: Some(true),
+			csr: None,
 		})
 	}
 	fn _new_acct_with_eab(email: String, body: SigBody) -> Option<Self> {
 		Some(Payload {
 			identifiers: None,
+			csr: None,
 			terms_of_service_agreed: Some(true),
 			external_account_binding: Some(body),
 			contact: Some(vec![format!("mailto:{}", email)]),
 		})
 	}
-	fn _new_order(dns: String) -> Option<Self> {
-		let list: Vec<Identifier> = dns.split(",").map(|s| Identifier::new(s.to_string())).collect();
+	fn _new_order(dns: &Vec<String>) -> Option<Self> {
+		let list: Vec<Identifier> = dns.iter().map(|s| Identifier::new(s.to_string())).collect();
 		Some(Payload {
 			identifiers: Some(list),
 			terms_of_service_agreed: None,
 			external_account_binding: None,
 			contact: None,
+			csr: None,
 		})
 	}
 	fn _new_authz() -> Option<Self> {
@@ -546,6 +578,16 @@ impl Payload {
 			terms_of_service_agreed: None,
 			external_account_binding: None,
 			contact: None,
+			csr: None,
+		})
+	}
+	fn _new_csr(csr: String) -> Option<Self> {
+		Some(Payload {
+			identifiers: None,
+			terms_of_service_agreed: None,
+			external_account_binding: None,
+			contact: None,
+			csr: Some(csr),
 		})
 	}
 }
@@ -600,11 +642,12 @@ impl SigBody {
 #[derive(Deserialize, Debug)]
 struct OrderRes {
 	identifier: Option<Identifier>,
-	//status: String,
+	status: String,
 	//expires: String,
 	authorizations: Option<Vec<String>>,
 	challenges: Option<Vec<OrderResChall>>,
-	//finalize: Option<String>,
+	finalize: Option<String>,
+	certificate: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -619,6 +662,19 @@ struct OrderResChall {
 // struct AcmeData {
 
 // }
+
+async fn _post_json(
+	url: &str,
+	nonce: String,
+	file_path: &str,
+	alg: &str,
+	kid: &str,
+	payload: Option<Payload>,
+) -> Result<reqwest::Response, AcmeError> {
+	let protected = Protected::from_kid(&url, nonce, alg, kid);
+	let sig_body = SigBody::from(payload, protected, file_path);
+	_http_json(&url, sig_body.to_string(), Method::POST).await
+}
 async fn _http_json(url: &str, body: Option<String>, method: Method) -> Result<reqwest::Response, AcmeError> {
 	//let params: HashMap<&str, &str> = [("host", h), ("type", "auto")].into_iter().collect();
 	println!("request {:?}: {}\nbody: {:?}", &method, url, &body);
@@ -731,21 +787,21 @@ async fn _new_acct(
 }
 
 async fn _new_order(
-	url: String,
+	url: &str,
 	nonce: String,
 	file_path: &str,
 	alg: &str,
 	kid: &str,
-	dns: String,
-) -> Result<(String, OrderRes), AcmeError> {
-	let protected = Protected::from_kid(&url, nonce, alg, kid);
-	let sig_body = SigBody::from(Payload::_new_order(dns), protected, file_path);
+	dns: &Vec<String>,
+) -> Result<(String, String, OrderRes), AcmeError> {
+	let res = _post_json(url, nonce, file_path, alg, kid, Payload::_new_order(dns)).await?;
 
-	let res = _http_json(&url, sig_body.to_string(), Method::POST).await?;
 	let o = _get_header(REPLAY_NONCE, res.headers());
+	let location = _get_header("Location", res.headers());
 	let res_str = res.text().await?;
+	println!("{}", &res_str);
 	let or_: OrderRes = serde_json::from_str(&res_str).unwrap();
-	Ok((o, or_))
+	Ok((o, location, or_))
 }
 
 async fn _auth_domain(
@@ -756,10 +812,7 @@ async fn _auth_domain(
 	kid: &str,
 ) -> Result<(String, OrderRes), AcmeError> {
 	//protected='{"nonce": "I4RLVp83dJs_Cmdyr2DAkMP1a2UeHlIj0oYrOgQiG0B_T0YslvQ", "url": "https://acme-v02.api.letsencrypt.org/acme/authz-v3/366261494877", "alg": "ES256", "kid": "https://acme-v02.api.letsencrypt.org/acme/acct/1792176437"}'
-	let protected = Protected::from_kid(&url, nonce, alg, kid);
-	let sig_body = SigBody::from(Payload::_new_authz(), protected, file_path);
-
-	let res = _http_json(&url, sig_body.to_string(), Method::POST).await?;
+	let res = _post_json(&url, nonce, file_path, alg, kid, Payload::_new_authz()).await?;
 	let o = _get_header(REPLAY_NONCE, res.headers());
 	let res_str = res.text().await?;
 	let or_: OrderRes = serde_json::from_str(&res_str).unwrap();
@@ -767,12 +820,7 @@ async fn _auth_domain(
 	Ok((o, or_))
 }
 
-async fn _write_to_challenges(
-	token: String,
-	domain: &str,
-	acme_dir: &str,
-	thumbprint: &str,
-) -> Result<String, AcmeError> {
+async fn _write_to_challenges(token: String, domain: &str, acme_dir: &str, thumbprint: &str) -> Result<String, AcmeError> {
 	let token = token.replace(r"[^A-Za-z0-9_\-]", "_");
 	let key_authorization = format!("{0}.{1}", token, thumbprint);
 	let well_known_path = format!("{}{}{}", acme_dir, LACATION_CHALLENGES, token);
@@ -789,23 +837,38 @@ async fn _write_to_challenges(
 	Ok(well_known_path)
 }
 
-async fn _chall_domain(
-	url: &str,
-	nonce: String,
-	file_path: &str,
-	alg: &str,
-	kid: &str,
-) -> Result<(String, bool), AcmeError> {
+async fn _chall_domain(url: &str, nonce: String, file_path: &str, alg: &str, kid: &str) -> Result<(String, bool), AcmeError> {
 	//protected='{"nonce": "I4RLVp830DhlbzGGoGqxd90G_wxxqbI25XFqmD1fxqaPMj4H_Os", "url": "https://acme-v02.api.letsencrypt.org/acme/chall-v3/366261494887/3xX-Gg", "alg": "ES256", "kid": "https://acme-v02.api.letsencrypt.org/acme/acct/1792176437"}'
-	let protected = Protected::from_kid(&url, nonce, alg, kid);
-	let sig_body = SigBody::from(Payload::_new_chall(), protected, file_path);
-
-	let res = _http_json(&url, sig_body.to_string(), Method::POST).await?;
+	let res = _post_json(&url, nonce, file_path, alg, kid, Payload::_new_chall()).await?;
 	let o = _get_header(REPLAY_NONCE, res.headers());
 	let res_str = res.text().await?;
 
 	let or_: OrderResChall = serde_json::from_str(&res_str).unwrap();
 	Ok((o, or_.status == STATUS_OK))
+}
+
+async fn _finalize_csr(
+	url: &str,
+	nonce: String,
+	file_path: &str,
+	alg: &str,
+	kid: &str,
+	csr: String,
+) -> Result<String, AcmeError> {
+	let res = _post_json(&url, nonce, file_path, alg, kid, Payload::_new_csr(csr)).await?;
+
+	let o = _get_header(REPLAY_NONCE, res.headers());
+	let res_str = res.text().await?;
+	println!("{}", res_str);
+	Ok(o)
+}
+
+async fn _down_certificate(url: &str, nonce: String, file_path: &str, alg: &str, kid: &str) -> Result<String, AcmeError> {
+	let res = _post_json(&url, nonce, file_path, alg, kid, None).await?;
+	let o = _get_header(REPLAY_NONCE, res.headers());
+	let res_str = res.text().await?;
+	println!("{}", res_str);
+	Ok(o)
 }
 
 fn _base64_hmac256(key: &str, s: &str) -> String {
@@ -855,6 +918,55 @@ fn _gen_key_by_cmd_openssl(account_key_path: &str, alg: &Alg) -> Output {
 
 	let out = Command::new("openssl").args(a).output().unwrap();
 	out
+}
+
+// echo "[SAN]\nsubjectAltName=$DNS" > openssl.cnf.1.tmp
+// cat /etc/ssl/openssl.cnf openssl.cnf.1.tmp > openssl.cnf.tmp
+// openssl req -new -key domain.key -subj "/" -reqexts SAN -config openssl.cnf.tmp  > domain.csr
+fn _gen_csr_by_cmd_openssl(acme_dir: &str, account_key_alg_: Alg, dns: &Vec<String>) -> Result<String, AcmeError> {
+	let domain_key_path = format!("{}/domain.key", acme_dir);
+	let domain_csr_path = format!("{}/domain.csr", acme_dir);
+	let tmp = format!("{}/openssl.cnf.tmp", acme_dir);
+
+	let _ = _gen_key_by_cmd_openssl(&domain_key_path, &account_key_alg_);
+	println!("Successfully. Gen domain key: {}", &domain_key_path);
+
+	let openssl_cnf = fs::read_to_string("/etc/ssl/openssl.cnf")?;
+	let dns_san = dns.iter().map(|_d| format!("DNS:{}", _d)).collect::<Vec<String>>().join(",");
+	let _ = _write_to_file(&tmp, format!("{}\n[SAN]\nsubjectAltName={}", openssl_cnf, dns_san));
+
+	let a = [
+		"req",
+		"-new",
+		"-key",
+		&domain_key_path,
+		"-subj",
+		"/",
+		"-reqexts",
+		"SAN",
+		"-config",
+		&tmp,
+		"-out",
+		&domain_csr_path,
+	];
+	let out = Command::new("openssl").args(a).output()?;
+	println!("{:?}", out);
+
+	let b = ["req", "-in", &domain_csr_path, "-outform", "DER"];
+	let out = Command::new("openssl").args(b).output()?;
+	let out = _base64(&out.stdout);
+	println!("{}", out);
+
+	Ok(out)
+}
+
+// 覆盖写入
+fn _write_to_file(file_path: &str, s: String) -> Result<(), AcmeError> {
+	let _ = File::create(&file_path)
+		.map_err(|_e| AcmeError::Tip(format!("Create file failed: {}. {}", file_path, _e.to_string())))?
+		.write(s.as_bytes())
+		.map_err(|_| AcmeError::Tip(format!("Write failed: {}", file_path)));
+	Ok(())
 }
 
 fn _print_key_by_cmd_openssl(account_key_path: &str, is_ecc: bool) -> Jwk {
@@ -908,12 +1020,12 @@ fn _sign_by_cmd_openssl(account_key_path: &str, plain: &str, is_ecc: bool, alg_l
 		}
 		let out = child.wait_with_output().unwrap();
 		let out = String::from_utf8(out.stdout).unwrap();
-		println!("sign ecc out:\n{}", &out);
+		//println!("sign ecc out:\n{}", &out);
 
 		_base64_hex(&_asn1_parse(&out))
 	} else {
 		let out = _base64(&out.stdout);
-		println!("sign rsa out: {}", &out);
+		//println!("sign rsa out: {}", &out);
 		out
 	}
 }
@@ -941,7 +1053,7 @@ fn _asn1_parse(text: &str) -> String {
 		.and_then(|cap| cap.get(1))
 		.map_or("", |m| m.as_str());
 
-	println!("ec_r: {}\nec_s: {}", ec_r, ec_s);
+	//println!("ec_r: {}\nec_s: {}", ec_r, ec_s);
 
 	format!("{}{}", ec_r, ec_s)
 }
@@ -953,4 +1065,10 @@ fn _regx(out: &str, reg: &str, need_rep: bool) -> String {
 		return p.replace(":", "").replace("\n", "").replace(" ", "");
 	}
 	p.to_string()
+}
+
+#[test]
+fn t() {
+	let dir = "/Users/pengh/www/pengh/docker_conf/nginx/ssl/le/pengh.cn/.acme";
+	let _ = _gen_csr_by_cmd_openssl(dir, Alg::new("ec3"), vec!["a.rs".to_string(), "www.a.rs".to_string()]);
 }
