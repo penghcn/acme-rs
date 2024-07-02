@@ -11,9 +11,13 @@ use std::io::Write;
 use std::process::{Command, Output, Stdio};
 
 const URL_LE: &str = "https://acme-v02.api.letsencrypt.org/directory";
+const URL_LE_INTERMEDIATE_RSA: &str = "https://letsencrypt.org/certs/2024/r11.pem"; // https://letsencrypt.org/zh-cn/certificates/
+const URL_LE_INTERMEDIATE_ECC: &str = "https://letsencrypt.org/certs/2024/e6.pem";
 
 const URL_ZERO: &str = "https://acme.zerossl.com/v2/DV90";
 const _URL_ZERO_EAB: &str = "https://api.zerossl.com/acme/eab-credentials-email";
+const URL_ZERO_INTERMEDIATE_RSA: &str = "https://crt.sh/?d=1282303295"; // https://help.zerossl.com/hc/en-us/articles/360060198034-Legacy-Client-Compatibility-Cross-Signed-Root-Certificates
+const URL_ZERO_INTERMEDIATE_ECC: &str = "https://crt.sh/?d=1282303296";
 
 const URL_BUYPASS: &str = "https://api.buypass.com/acme/directory"; //注意大陆境内，该链接无法访问
 const URL_GOOGLE: &str = "https://dv.acme-v02.api.pki.goog/directory"; //注意大陆境内，该链接无法访问
@@ -26,17 +30,17 @@ const REPLAY_NONCE: &str = "replay-nonce";
 const TYPE_HTTP: &str = "http-01";
 const STATUS_OK: &str = "valid"; //valid, pending, invalid
 
-const MAX_TRY: u8 = 5; //
-const SLEEP_SECS: u64 = 2; //
+const MAX_TRY: u8 = 8; //
+const SLEEP_DURATION: std::time::Duration = std::time::Duration::from_secs(2); //2s
 
 const TIP_REQUIRED_EMAIL: &str = "Required email, add param like: email=a@a.org";
+const TIP_DOWN_CRT_FAILED: &str = "Download certificate failed, exiting.";
 const TIP_MAX_TRY: &str = "Maximum attempts reached, exiting.";
 
 #[tokio::main]
 async fn main() {
 	// cargo test --test acme -- _acme --exact --show-output  dns=ai8.rs,www.ai8.rs dir=~/www/pengh/docker_conf/nginx/ssl/le/ai8.rs email=a@a.org ca=z
 	// cargo run -- dns=ai8.rs,www.ai8.rs dir=~/www/pengh/docker_conf/nginx/ssl/le/ai8.rs email=a@a.org ca=z
-
 	let args: Vec<String> = std::env::args().skip(1).collect(); // 获取所有的命令行参数，跳过第一个参数（程序路径）
 	dbg!(&args);
 
@@ -46,12 +50,24 @@ async fn main() {
 		return; //中断
 	}
 
-	if let Err(_e) = _acme_run(_cfg.unwrap()).await {
-		println!("{:?}", _e);
+	// ssl_certificate .../le_ssl_chained.pem;
+	// ssl_certificate_key .../le_ssl_domain.key;
+	match _acme_run(_cfg.unwrap()).await {
+		Err(_e) => println!("{:?}", _e),
+		Ok((sign_crt_path_, chained_pem_path_, domain_key_path_)) => {
+			println!(
+				"Successfully. For Nginx configuration:\nssl_certificate {0}\nssl_certificate_key {1}",
+				chained_pem_path_, domain_key_path_
+			);
+			println!(
+				"\nFor Apache configuration:\nSSLEngine on\nSSLCertificateFile {0}\nSSLCertificateKeyFile {1}\nSSLCertificateChainFile {2}",
+				sign_crt_path_, chained_pem_path_, domain_key_path_
+			);
+		}
 	}
 }
 
-async fn _acme_run(cfg: AcmeCfg) -> Result<(), AcmeError> {
+async fn _acme_run(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError> {
 	// 0 初始化参数，获取或者默认值
 	println!("Step1 Init Params: {:?}", cfg);
 	let dns_ = cfg.dns;
@@ -72,7 +88,6 @@ async fn _acme_run(cfg: AcmeCfg) -> Result<(), AcmeError> {
 	let _nonce = _new_nonce(&_dir.new_nonce).await?;
 
 	// 3
-
 	// 3.1 先获取或生成 account.key, 通过参数指定(参考enum Alg)， 目前支持 rsa2048,rsa4096,prime256v1,prime384v1,prime512v1
 	let account_key_path_ = cfg.account_key_path.as_str();
 	let alg_ = cfg.alg;
@@ -118,31 +133,24 @@ async fn _acme_run(cfg: AcmeCfg) -> Result<(), AcmeError> {
 			if attempts == MAX_TRY {
 				return Err(AcmeError::Tip(TIP_MAX_TRY.to_string()));
 			}
-			std::thread::sleep(std::time::Duration::from_secs(SLEEP_SECS));
+			let _ = tokio::time::sleep(SLEEP_DURATION);
 		}
 		let _ = fs::remove_file(&_well_known_path).map_err(|_| AcmeError::Tip(format!("Remove failed: {}", _well_known_path)));
 	}
 
 	// 4.3 finalize csr
 	let _url = &_order_res.finalize.unwrap();
-	let _csr = _gen_csr_by_cmd_openssl(&cfg.acme_dir, alg_, &dns_)?;
-	let (_nonce,_c) = _finalize_csr(_url, _mut_nonce_, &account_key_path_, &alg, &kid, _csr).await?;
-	_mut_nonce_ = _nonce;
-
-	if let Some(_url) = _c {
-		_down_certificate(&_url, _mut_nonce_, &account_key_path_, &alg, &kid).await?;
-		return Ok(());
-	}
+	let (_csr, domain_key_path_) = _gen_csr_by_cmd_openssl(&cfg.acme_dir, &alg_, &dns_)?;
 
 	//轮询
 	let mut attempts: u8 = 0;
+	let mut _cert_url: Option<String> = None;
 	loop {
-		let (_nonce, _, _order_res) = _new_order(&_location, _mut_nonce_, &account_key_path_, &alg, &kid, &dns_).await?;
+		let (_nonce, _or) = _finalize_csr(_url, _mut_nonce_, &account_key_path_, &alg, &kid, _csr.clone()).await?;
 		_mut_nonce_ = _nonce;
-		if _order_res.status == STATUS_OK {
-			println!("Successful.{}", &_location);
-			// 4.4 download certificate
-			_down_certificate(&_order_res.certificate.unwrap(), _mut_nonce_, &account_key_path_, &alg, &kid).await?;
+		if _or.status == STATUS_OK {
+			//println!("Successful.{:?}", &_or.certificate);
+			_cert_url = _or.certificate;
 			break;
 		}
 		attempts += 1;
@@ -150,14 +158,30 @@ async fn _acme_run(cfg: AcmeCfg) -> Result<(), AcmeError> {
 		if attempts == MAX_TRY {
 			return Err(AcmeError::Tip(TIP_MAX_TRY.to_string()));
 		}
-		std::thread::sleep(std::time::Duration::from_secs(SLEEP_SECS));
+		let _ = tokio::time::sleep(SLEEP_DURATION);
 	}
 
-	Ok(())
+	// 4.4 down certificate
+	if let None = _cert_url {
+		return Err(AcmeError::Tip(TIP_DOWN_CRT_FAILED.to_string()));
+	}
+	let _sign_crt = _down_certificate(&_cert_url.unwrap(), _mut_nonce_, &account_key_path_, &alg, &kid).await?;
+
+	let _intermediate_crt_url = cfg.ca.intermediate_crt_url(alg_.is_ecc());
+	let _intermediate_pem = _http_json(&_intermediate_crt_url, None, Method::GET).await?.text().await?;
+
+	// 5、最后，合并sign.crt和intermediate.pem的内容成 chained.pem
+	let sign_crt_path_ = format!("{}/sign.crt", cfg.acme_dir);
+	let chained_pem_path_ = format!("{}/chained.crt", cfg.acme_dir);
+	let _ = _write_to_file(&sign_crt_path_, &_sign_crt)?;
+	let _ = _write_to_file(&chained_pem_path_, &format!("{0}\n{1}", _sign_crt, _intermediate_pem))?;
+
+	Ok((sign_crt_path_, chained_pem_path_, domain_key_path_))
 }
 
 trait CA {
 	fn directory_url(&self) -> &'static str;
+	fn intermediate_crt_url(&self, is_ecc: bool) -> &'static str;
 }
 
 struct LetsEncrypt;
@@ -169,11 +193,25 @@ impl CA for LetsEncrypt {
 	fn directory_url(&self) -> &'static str {
 		URL_LE
 	}
+	fn intermediate_crt_url(&self, is_ecc: bool) -> &'static str {
+		if is_ecc {
+			URL_LE_INTERMEDIATE_ECC
+		} else {
+			URL_LE_INTERMEDIATE_RSA
+		}
+	}
 }
 
 impl CA for ZeroSSL {
 	fn directory_url(&self) -> &'static str {
 		URL_ZERO
+	}
+	fn intermediate_crt_url(&self, is_ecc: bool) -> &'static str {
+		if is_ecc {
+			URL_ZERO_INTERMEDIATE_ECC
+		} else {
+			URL_ZERO_INTERMEDIATE_RSA
+		}
 	}
 }
 
@@ -181,10 +219,16 @@ impl CA for Google {
 	fn directory_url(&self) -> &'static str {
 		URL_GOOGLE
 	}
+	fn intermediate_crt_url(&self, is_ecc: bool) -> &'static str {
+		URL_GOOGLE
+	}
 }
 
 impl CA for BuyPass {
 	fn directory_url(&self) -> &'static str {
+		URL_BUYPASS
+	}
+	fn intermediate_crt_url(&self, is_ecc: bool) -> &'static str {
 		URL_BUYPASS
 	}
 }
@@ -221,6 +265,10 @@ impl AcmeCa {
 
 	fn directory_url(&self) -> String {
 		self.ca().directory_url().to_string()
+	}
+
+	fn intermediate_crt_url(&self, is_ecc: bool) -> String {
+		self.ca().intermediate_crt_url(is_ecc).to_string()
 	}
 
 	fn ca(&self) -> &dyn CA {
@@ -809,7 +857,7 @@ async fn _write_to_challenges(token: String, domain: &str, acme_dir: &str, thumb
 	let token = token.replace(r"[^A-Za-z0-9_\-]", "_");
 	let key_authorization = format!("{0}.{1}", token, thumbprint);
 	let well_known_path = format!("{}{}{}", acme_dir, LACATION_CHALLENGES, token);
-	let _ = _write_to_file(&well_known_path, &key_authorization);
+	let _ = _write_to_file(&well_known_path, &key_authorization)?;
 	let wellknown_url = format!("http://{0}/.well-known/acme-challenge/{1}", domain, token);
 	let ka = _http_json(&wellknown_url, None, Method::GET).await?.text().await?; // 自己先验一下
 	if ka != key_authorization {
@@ -834,22 +882,22 @@ async fn _finalize_csr(
 	alg: &str,
 	kid: &str,
 	csr: String,
-) -> Result<(String, Option<String>), AcmeError> {
+) -> Result<(String, OrderRes), AcmeError> {
 	let res = _post_kid(&url, nonce, file_path, alg, kid, Payload::_new_csr(csr)).await?;
 	let o = _get_header(REPLAY_NONCE, res.headers());
 	let res_str = res.text().await?;
 	println!("{}", res_str);
 	let or_: OrderRes = serde_json::from_str(&res_str).unwrap();
-	let a = if or_.status == STATUS_OK { or_.certificate } else { None };
-	Ok((o, a))
+	//let a = if or_.status == STATUS_OK { or_.certificate } else { None };
+	Ok((o, or_))
 }
 
-async fn _down_certificate(url: &str, nonce: String, file_path: &str, alg: &str, kid: &str) -> Result<(), AcmeError> {
+async fn _down_certificate(url: &str, nonce: String, file_path: &str, alg: &str, kid: &str) -> Result<String, AcmeError> {
 	let res = _post_kid(&url, nonce, file_path, alg, kid, None).await?;
-	//let o = _get_header(REPLAY_NONCE, res.headers());
 	let res_str = res.text().await?;
-	println!("{}", res_str);
-	Ok(())
+	//println!("{}", res_str);
+	//let _ = _write_to_file(sign_crt_path, &res_str)?;
+	Ok(res_str)
 }
 
 fn _base64_hmac256(key: &str, s: &str) -> String {
@@ -903,7 +951,7 @@ fn _gen_key_by_cmd_openssl(account_key_path: &str, alg: &Alg) -> Output {
 // echo "[SAN]\nsubjectAltName=$DNS" > openssl.cnf.1.tmp
 // cat /etc/ssl/openssl.cnf openssl.cnf.1.tmp > openssl.cnf.tmp
 // openssl req -new -key domain.key -subj "/" -reqexts SAN -config openssl.cnf.tmp  > domain.csr
-fn _gen_csr_by_cmd_openssl(acme_dir: &str, account_key_alg_: Alg, dns: &Vec<String>) -> Result<String, AcmeError> {
+fn _gen_csr_by_cmd_openssl(acme_dir: &str, account_key_alg_: &Alg, dns: &Vec<String>) -> Result<(String, String), AcmeError> {
 	let domain_key_path = format!("{}/domain.key", acme_dir);
 	let domain_csr_path = format!("{}/domain.csr", acme_dir);
 	let tmp = format!("{}/openssl.cnf.tmp", acme_dir);
@@ -913,7 +961,7 @@ fn _gen_csr_by_cmd_openssl(acme_dir: &str, account_key_alg_: Alg, dns: &Vec<Stri
 
 	let openssl_cnf = fs::read_to_string("/etc/ssl/openssl.cnf")?;
 	let dns_san = dns.iter().map(|_d| format!("DNS:{}", _d)).collect::<Vec<String>>().join(",");
-	let _ = _write_to_file(&tmp, &format!("{}\n[SAN]\nsubjectAltName={}", openssl_cnf, dns_san));
+	let _ = _write_to_file(&tmp, &format!("{}\n[SAN]\nsubjectAltName={}", openssl_cnf, dns_san))?;
 
 	let a = [
 		"req",
@@ -937,7 +985,7 @@ fn _gen_csr_by_cmd_openssl(acme_dir: &str, account_key_alg_: Alg, dns: &Vec<Stri
 	let out = _base64(&out.stdout);
 	println!("{}", out);
 
-	Ok(out)
+	Ok((out, domain_key_path))
 }
 
 // 覆盖写入
