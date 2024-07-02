@@ -15,7 +15,7 @@ const URL_LE_INTERMEDIATE_RSA: &str = "https://letsencrypt.org/certs/2024/r11.pe
 const URL_LE_INTERMEDIATE_ECC: &str = "https://letsencrypt.org/certs/2024/e6.pem";
 
 const URL_ZERO: &str = "https://acme.zerossl.com/v2/DV90";
-const _URL_ZERO_EAB: &str = "https://api.zerossl.com/acme/eab-credentials-email";
+const URL_ZERO_EAB: &str = "https://api.zerossl.com/acme/eab-credentials-email";
 const URL_ZERO_INTERMEDIATE_RSA: &str = "https://crt.sh/?d=1282303295"; // https://help.zerossl.com/hc/en-us/articles/360060198034-Legacy-Client-Compatibility-Cross-Signed-Root-Certificates
 const URL_ZERO_INTERMEDIATE_ECC: &str = "https://crt.sh/?d=1282303296";
 
@@ -220,7 +220,7 @@ impl CA for ZeroSSL {
 		URL_ZERO
 	}
 	fn eab_url(&self) -> &'static str {
-		_URL_ZERO_EAB
+		URL_ZERO_EAB
 	}
 	fn intermediate_crt_url(&self, is_ecc: bool) -> &'static str {
 		if is_ecc {
@@ -236,7 +236,7 @@ impl CA for Google {
 		URL_GOOGLE
 	}
 	fn eab_url(&self) -> &'static str {
-		_URL_ZERO_EAB
+		URL_ZERO_EAB
 	}
 	fn intermediate_crt_url(&self, is_ecc: bool) -> &'static str {
 		URL_GOOGLE
@@ -248,7 +248,7 @@ impl CA for BuyPass {
 		URL_BUYPASS
 	}
 	fn eab_url(&self) -> &'static str {
-		_URL_ZERO_EAB
+		URL_ZERO_EAB
 	}
 	fn intermediate_crt_url(&self, is_ecc: bool) -> &'static str {
 		URL_BUYPASS
