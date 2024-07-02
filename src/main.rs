@@ -101,8 +101,17 @@ async fn _acme_run(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError> 
 
 	// 3.2 注册账号接口 /acme/new-acct
 	//let email = if external_account_required { cfg.email } else { None };
-	let email = cfg.email.filter(|_| external_account_required);
-	let (_nonce, kid) = _new_acct(_dir.new_account, _nonce, email, account_key_path_, &alg, jwk).await?;
+	//let email = cfg.email.filter(|_| external_account_required);
+	let (_nonce, kid) = _new_acct(
+		_dir.new_account,
+		_nonce,
+		cfg.email,
+		cfg.ca.eab_url(),
+		account_key_path_,
+		&alg,
+		jwk,
+	)
+	.await?;
 	println!("\nStep3 POST account. {}", _nonce);
 
 	// 4 下单 -> 验证每个域名 -> 验证每个域名
@@ -181,6 +190,7 @@ async fn _acme_run(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError> 
 
 trait CA {
 	fn directory_url(&self) -> &'static str;
+	fn eab_url(&self) -> &'static str;
 	fn intermediate_crt_url(&self, is_ecc: bool) -> &'static str;
 }
 
@@ -191,6 +201,9 @@ struct BuyPass;
 
 impl CA for LetsEncrypt {
 	fn directory_url(&self) -> &'static str {
+		URL_LE
+	}
+	fn eab_url(&self) -> &'static str {
 		URL_LE
 	}
 	fn intermediate_crt_url(&self, is_ecc: bool) -> &'static str {
@@ -206,6 +219,9 @@ impl CA for ZeroSSL {
 	fn directory_url(&self) -> &'static str {
 		URL_ZERO
 	}
+	fn eab_url(&self) -> &'static str {
+		_URL_ZERO_EAB
+	}
 	fn intermediate_crt_url(&self, is_ecc: bool) -> &'static str {
 		if is_ecc {
 			URL_ZERO_INTERMEDIATE_ECC
@@ -219,6 +235,9 @@ impl CA for Google {
 	fn directory_url(&self) -> &'static str {
 		URL_GOOGLE
 	}
+	fn eab_url(&self) -> &'static str {
+		_URL_ZERO_EAB
+	}
 	fn intermediate_crt_url(&self, is_ecc: bool) -> &'static str {
 		URL_GOOGLE
 	}
@@ -227,6 +246,9 @@ impl CA for Google {
 impl CA for BuyPass {
 	fn directory_url(&self) -> &'static str {
 		URL_BUYPASS
+	}
+	fn eab_url(&self) -> &'static str {
+		_URL_ZERO_EAB
 	}
 	fn intermediate_crt_url(&self, is_ecc: bool) -> &'static str {
 		URL_BUYPASS
@@ -266,11 +288,12 @@ impl AcmeCa {
 	fn directory_url(&self) -> String {
 		self.ca().directory_url().to_string()
 	}
-
+	fn eab_url(&self) -> String {
+		self.ca().eab_url().to_string()
+	}
 	fn intermediate_crt_url(&self, is_ecc: bool) -> String {
 		self.ca().intermediate_crt_url(is_ecc).to_string()
 	}
-
 	fn ca(&self) -> &dyn CA {
 		match self {
 			AcmeCa::LetsEncrypt(ca) => ca.as_ref(),
@@ -786,6 +809,7 @@ async fn _new_acct(
 	url: String,
 	nonce: String,
 	email: Option<String>,
+	eab_url: String,
 	file_path: &str,
 	alg: &str,
 	jwk: Jwk,
@@ -795,7 +819,7 @@ async fn _new_acct(
 	// let jwk_alg = _print_key_by_cmd_openssl(&file_path, is_ecc);
 
 	let payload = if let Some(email) = email {
-		let eab = _eab_email(&_URL_ZERO_EAB, &email).await?;
+		let eab = _eab_email(&eab_url, &email).await?;
 		let eab_payload64 = _base64(jwk.to_string().as_bytes());
 		let sb = SigBody::new(
 			eab_payload64,
