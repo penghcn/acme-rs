@@ -24,8 +24,6 @@ const ALG_DEFAULT_EC3: &str = "EC3";
 
 const REPLAY_NONCE: &str = "replay-nonce";
 const TYPE_HTTP: &str = "http-01";
-//const TYPE_DNS: &str = "dns-01";
-//const TYPE_ALPN: &str = "tls-alpn-01";
 const STATUS_OK: &str = "valid"; //valid, pending, invalid
 
 const MAX_TRY: u8 = 5; //
@@ -34,16 +32,12 @@ const SLEEP_SECS: u64 = 2; //
 const TIP_REQUIRED_EMAIL: &str = "Required email, add param like: email=a@a.org";
 const TIP_MAX_TRY: &str = "Maximum attempts reached, exiting.";
 
-// rm -rf ~/.acme.sh/*
-// 参考 sh ./a.sh --issue -d ai8.rs -d www.ai8.rs -d cp.ai8.rs -w ~/www/ai8.rs  --debug 3 --keylength ec-384 --register-account -m my_tmp_email@163.com --server zerossl
-
 #[tokio::main]
 async fn main() {
-	// 获取所有的命令行参数，跳过第一个参数（程序路径）
 	// cargo test --test acme -- _acme --exact --show-output  dns=ai8.rs,www.ai8.rs dir=~/www/pengh/docker_conf/nginx/ssl/le/ai8.rs email=a@a.org ca=z
 	// cargo run -- dns=ai8.rs,www.ai8.rs dir=~/www/pengh/docker_conf/nginx/ssl/le/ai8.rs email=a@a.org ca=z
 
-	let args: Vec<String> = std::env::args().skip(1).collect();
+	let args: Vec<String> = std::env::args().skip(1).collect(); // 获取所有的命令行参数，跳过第一个参数（程序路径）
 	dbg!(&args);
 
 	let _cfg = AcmeCfg::new(args);
@@ -76,15 +70,12 @@ async fn _acme_run(cfg: AcmeCfg) -> Result<(), AcmeError> {
 
 	// 2 获取nonce接口  /acme/new-nonce
 	let _nonce = _new_nonce(&_dir.new_nonce).await?;
-	//let nonce = "5yfKMBJJlBFlOD5krHoGQPfcIGi-ad7Ri5bfCjM2Hnys1Q8WBD8";
 
 	// 3
 
 	// 3.1 先获取或生成 account.key, 通过参数指定(参考enum Alg)， 目前支持 rsa2048,rsa4096,prime256v1,prime384v1,prime512v1
-	//let account_key_path_ = "~/www/pengh/docker_conf/nginx/ssl/le/acct.key";
 	let account_key_path_ = cfg.account_key_path.as_str();
 	let alg_ = cfg.alg;
-	//let file_path = "~/.acme.sh/ca/acme-v02.api.letsencrypt.org/directory/account.key";
 	let _ = _gen_key_by_cmd_openssl(&account_key_path_, &alg_);
 	println!("Successfully. Gen account key: {}", &account_key_path_);
 
@@ -157,7 +148,6 @@ async fn _acme_run(cfg: AcmeCfg) -> Result<(), AcmeError> {
 		std::thread::sleep(std::time::Duration::from_secs(SLEEP_SECS));
 	}
 
-	// 4.4 download certificate
 	Ok(())
 }
 
@@ -427,8 +417,7 @@ impl JwkRsa {
 	}
 }
 
-// 参考serde用法详解
-// https://blog.wangjunfeng.com/post/2024/rust-serde/#serderename--name-1
+// 参考serde用法详解 https://blog.wangjunfeng.com/post/2024/rust-serde/#serderename--name-1
 #[derive(Serialize, Debug)]
 #[serde(untagged)]
 enum Jwk {
@@ -479,7 +468,6 @@ struct Protected<'a> {
 	#[serde(skip_serializing_if = "Option::is_none")]
 	kid: Option<&'a str>,
 }
-
 impl<'a> Protected<'a> {
 	pub fn from(url: &'a str, nonce: String, alg: &'a str, jwk: Jwk) -> Self {
 		Protected {
@@ -539,7 +527,6 @@ struct Payload {
 	#[serde(skip_serializing_if = "Option::is_none")]
 	csr: Option<String>,
 }
-
 impl Payload {
 	fn _new_acct() -> Option<Self> {
 		Some(Payload {
@@ -598,7 +585,6 @@ struct SigBody {
 	protected: String,
 	signature: String,
 }
-
 impl SigBody {
 	pub fn from(payload: Option<Payload>, protected: Protected, file_path: &str) -> Self {
 		Self::new(Self::payload64(payload), protected, file_path)
@@ -659,11 +645,7 @@ struct OrderResChall {
 	token: String,
 }
 
-// struct AcmeData {
-
-// }
-
-async fn _post_json(
+async fn _post_kid(
 	url: &str,
 	nonce: String,
 	file_path: &str,
@@ -794,8 +776,7 @@ async fn _new_order(
 	kid: &str,
 	dns: &Vec<String>,
 ) -> Result<(String, String, OrderRes), AcmeError> {
-	let res = _post_json(url, nonce, file_path, alg, kid, Payload::_new_order(dns)).await?;
-
+	let res = _post_kid(url, nonce, file_path, alg, kid, Payload::_new_order(dns)).await?;
 	let o = _get_header(REPLAY_NONCE, res.headers());
 	let location = _get_header("Location", res.headers());
 	let res_str = res.text().await?;
@@ -812,11 +793,10 @@ async fn _auth_domain(
 	kid: &str,
 ) -> Result<(String, OrderRes), AcmeError> {
 	//protected='{"nonce": "I4RLVp83dJs_Cmdyr2DAkMP1a2UeHlIj0oYrOgQiG0B_T0YslvQ", "url": "https://acme-v02.api.letsencrypt.org/acme/authz-v3/366261494877", "alg": "ES256", "kid": "https://acme-v02.api.letsencrypt.org/acme/acct/1792176437"}'
-	let res = _post_json(&url, nonce, file_path, alg, kid, Payload::_new_authz()).await?;
+	let res = _post_kid(&url, nonce, file_path, alg, kid, Payload::_new_authz()).await?;
 	let o = _get_header(REPLAY_NONCE, res.headers());
 	let res_str = res.text().await?;
 	let or_: OrderRes = serde_json::from_str(&res_str).unwrap();
-	//}
 	Ok((o, or_))
 }
 
@@ -824,11 +804,6 @@ async fn _write_to_challenges(token: String, domain: &str, acme_dir: &str, thumb
 	let token = token.replace(r"[^A-Za-z0-9_\-]", "_");
 	let key_authorization = format!("{0}.{1}", token, thumbprint);
 	let well_known_path = format!("{}{}{}", acme_dir, LACATION_CHALLENGES, token);
-	// let _ = File::create(&well_known_path)
-	// 	.map_err(|_e| AcmeError::Tip(format!("Create file failed: {}. {}", well_known_path, _e.to_string())))?
-	// 	.write(key_authorization.as_bytes())
-	// 	.map_err(|_| AcmeError::Tip(format!("Write failed: {}", well_known_path)));
-	// println!("Successfully. Write to {}:{}", well_known_path, key_authorization);
 	let _ = _write_to_file(&well_known_path, &key_authorization);
 	let wellknown_url = format!("http://{0}/.well-known/acme-challenge/{1}", domain, token);
 	let ka = _http_json(&wellknown_url, None, Method::GET).await?.text().await?; // 自己先验一下
@@ -840,10 +815,9 @@ async fn _write_to_challenges(token: String, domain: &str, acme_dir: &str, thumb
 
 async fn _chall_domain(url: &str, nonce: String, file_path: &str, alg: &str, kid: &str) -> Result<(String, bool), AcmeError> {
 	//protected='{"nonce": "I4RLVp830DhlbzGGoGqxd90G_wxxqbI25XFqmD1fxqaPMj4H_Os", "url": "https://acme-v02.api.letsencrypt.org/acme/chall-v3/366261494887/3xX-Gg", "alg": "ES256", "kid": "https://acme-v02.api.letsencrypt.org/acme/acct/1792176437"}'
-	let res = _post_json(&url, nonce, file_path, alg, kid, Payload::_new_chall()).await?;
+	let res = _post_kid(&url, nonce, file_path, alg, kid, Payload::_new_chall()).await?;
 	let o = _get_header(REPLAY_NONCE, res.headers());
 	let res_str = res.text().await?;
-
 	let or_: OrderResChall = serde_json::from_str(&res_str).unwrap();
 	Ok((o, or_.status == STATUS_OK))
 }
@@ -856,20 +830,19 @@ async fn _finalize_csr(
 	kid: &str,
 	csr: String,
 ) -> Result<String, AcmeError> {
-	let res = _post_json(&url, nonce, file_path, alg, kid, Payload::_new_csr(csr)).await?;
-
+	let res = _post_kid(&url, nonce, file_path, alg, kid, Payload::_new_csr(csr)).await?;
 	let o = _get_header(REPLAY_NONCE, res.headers());
 	let res_str = res.text().await?;
 	println!("{}", res_str);
 	Ok(o)
 }
 
-async fn _down_certificate(url: &str, nonce: String, file_path: &str, alg: &str, kid: &str) -> Result<String, AcmeError> {
-	let res = _post_json(&url, nonce, file_path, alg, kid, None).await?;
-	let o = _get_header(REPLAY_NONCE, res.headers());
+async fn _down_certificate(url: &str, nonce: String, file_path: &str, alg: &str, kid: &str) -> Result<(), AcmeError> {
+	let res = _post_kid(&url, nonce, file_path, alg, kid, None).await?;
+	//let o = _get_header(REPLAY_NONCE, res.headers());
 	let res_str = res.text().await?;
 	println!("{}", res_str);
-	Ok(o)
+	Ok(())
 }
 
 fn _base64_hmac256(key: &str, s: &str) -> String {
@@ -902,7 +875,6 @@ fn _base64_sha256(p: &str) -> String {
 	let mut hasher = Sha256::new();
 	hasher.update(p.as_bytes());
 	let hash = hasher.finalize();
-
 	let b64_hash = _base64(&hash);
 	//println!("sha2 sha256 base64: {}", b64_hash);
 	b64_hash
@@ -984,9 +956,6 @@ fn _print_key_by_cmd_openssl(account_key_path: &str, is_ecc: bool) -> Jwk {
 
 fn _sign_by_cmd_openssl(account_key_path: &str, plain: &str, is_ecc: bool, alg_len: &str) -> String {
 	let sha = format!("-sha{}", &alg_len);
-	//let rsa :&[&str]= &["dgst", &sha, "-sign", &file_path];
-	//let ecc :&[&str]= &["dgst", &sha, "-sign", &file_path, "|", "openssl", "asn1parse", "-inform", "DER"];
-	// echo "" | openssl dgst -sha256 -sign ~/.acme.sh/ca/acme-v02.api.letsencrypt.org/directory/account.key
 	let mut child = Command::new("openssl")
 		.args(&["dgst", &sha, "-sign", &account_key_path])
 		.stdin(Stdio::piped())
@@ -1038,15 +1007,6 @@ fn _sign_by_cmd_openssl(account_key_path: &str, plain: &str, is_ecc: bool, alg_l
 */
 fn _asn1_parse(text: &str) -> String {
 	let re = Regex::new(r"prim: INTEGER\s*:\s*(\w+)").unwrap();
-
-	// 使用 re.captures_iter() 来迭代所有匹配项
-	// for cap in re.captures_iter(text) {
-	//     if let Some(hex_string) = cap.get(1) {
-	//         println!("Found hex string: {}", hex_string.as_str());
-	//     }
-	// }
-
-	// 假设第一行是 x，第二行是 y
 	let ec_r = re.captures(text).unwrap().get(1).map_or("", |m| m.as_str());
 	let ec_s = re
 		.captures_iter(text)
@@ -1066,10 +1026,4 @@ fn _regx(out: &str, reg: &str, need_rep: bool) -> String {
 		return p.replace(":", "").replace("\n", "").replace(" ", "");
 	}
 	p.to_string()
-}
-
-#[test]
-fn t() {
-	let dir = "/Users/pengh/www/pengh/docker_conf/nginx/ssl/le/pengh.cn/.acme";
-	let _ = _gen_csr_by_cmd_openssl(dir, Alg::new("ec3"), &vec!["a.rs".to_string(), "www.a.rs".to_string()]);
 }
