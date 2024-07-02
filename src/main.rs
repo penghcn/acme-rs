@@ -26,16 +26,19 @@ const LACATION_CHALLENGES: &str = "/challenges/";
 const CA_DEFAULT_LE: &str = "le";
 const ALG_DEFAULT_EC3: &str = "EC3";
 
+const CONTENT_TYPE_JSON: &str = "application/jose+json";
+const USER_AGENT: &str = "acme.rs";
+
 const REPLAY_NONCE: &str = "replay-nonce";
 const TYPE_HTTP: &str = "http-01";
 const STATUS_OK: &str = "valid"; //valid, pending, invalid
 
-const MAX_TRY: u8 = 8; //
-const SLEEP_DURATION: std::time::Duration = std::time::Duration::from_secs(2); //2s
-
 const TIP_REQUIRED_EMAIL: &str = "Required email, add param like: email=a@a.org";
 const TIP_DOWN_CRT_FAILED: &str = "Download certificate failed, exiting.";
 const TIP_MAX_TRY: &str = "Maximum attempts reached, exiting.";
+
+const MAX_TRY: u8 = 8; //
+const SLEEP_DURATION: std::time::Duration = std::time::Duration::from_secs(2); //2s
 
 #[tokio::main]
 async fn main() {
@@ -748,8 +751,8 @@ async fn _http_json(url: &str, body: Option<String>, method: Method) -> Result<r
 	};
 
 	let response = cb
-		.header("Content-Type", "application/jose+json")
-		.header("User-Agent", "acme.rs")
+		.header("Content-Type", CONTENT_TYPE_JSON)
+		.header("User-Agent", USER_AGENT)
 		.send()
 		.await
 		.map_err(AcmeError::from)?;
