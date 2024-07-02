@@ -40,25 +40,25 @@ log   | info | Case-insensitive. Log level: info,debug,trace
     }
 
     server {
-		listen 443 ssl http2;
-		server_name ai8.rs www.ai8.rs;
+        listen 443 ssl http2;
+        server_name ai8.rs www.ai8.rs;
 
-		include ssl.conf; # Recommended SSL ciphers 
+        include ssl.conf; # Recommended SSL ciphers 
 
-		ssl_certificate /www/ai8.rs/.acme/chained.pem;
-		ssl_certificate_key /www/ai8.rs/.acme/domain.key;
+        ssl_certificate /www/ai8.rs/.acme/chained.pem;
+        ssl_certificate_key /www/ai8.rs/.acme/domain.key;
 
         real_ip_header X-Real-IP;
-		
-		location / {
-			proxy_set_header	X-Real-IP		$remote_addr;
-			proxy_set_header	X-Forwarded-For	$proxy_add_x_forwarded_for;
-			#proxy_set_header	Host			$http_host;
-			proxy_set_header	X-NginX-Proxy	true;
-			proxy_set_header	Connection		"";
-			proxy_http_version	1.1;
-			proxy_pass			https://bing.com;
-		}
+        
+        location / {
+            proxy_set_header    X-Real-IP       $remote_addr;
+            proxy_set_header    X-Forwarded-For $proxy_add_x_forwarded_for;
+            #proxy_set_header   Host            $http_host;
+            proxy_set_header    X-NginX-Proxy   true;
+            proxy_set_header    Connection      "";
+            proxy_http_version  1.1;
+            proxy_pass          https://bing.com;
+        }
     }
 ```
 
