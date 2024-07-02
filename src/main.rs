@@ -741,7 +741,6 @@ async fn _http_json(url: &str, body: Option<String>, method: Method) -> Result<r
 	let cb = match method {
 		Method::GET => client.get(url),
 		Method::HEAD => client.head(url),
-		Method::PostForm => client.post(url),
 		_ => match body {
 			Some(body) => client.post(url).body(body),
 			_ => client.post(url),
