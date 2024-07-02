@@ -16,11 +16,12 @@ cargo run --  dns=ai8.rs,www.ai8.rs dir=/www/ai8.rs ca=z email=a@a.rs alg=ec5
 
 key | default | description
 -|-|-
-dns   | -   | Required, single or multiple, separated by commas. For example: ai8.rs,www.ai8.rs
-dir   | -   | Required, acme root path, must match your nginx config, e.g. /www/ai8.rs
-email | -   | Register account email. When ca is ZeroSSL, email required
-ca    | le  | Case-insensitive. The defalut is "le", which stands for Let's Encrypt. ZeroSSL can be abbreviated as "Z","z","zero". Google as "g". BuyPass as "b"
-alg   | ec3 | Case-insensitive. Algorithm abbreviation: ec2,ec3,ec5,rsa2,rsa4, which are secp256r1,secp384r1,secp521r1,rsa2048,rsa4096
+dns   | -    | Required, single or multiple, separated by commas. For example: ai8.rs,www.ai8.rs
+dir   | -    | Required, acme root path, must match your nginx config, e.g. /www/ai8.rs
+email | -    | Register account email. When ca is ZeroSSL, email required
+ca    | le   | Case-insensitive. The defalut is "le", which stands for Let's Encrypt. ZeroSSL can be abbreviated as "Z","z","zero". Google Trust as "g". BuyPass as "b"
+alg   | ec3  | Case-insensitive. Algorithm abbreviation: ec2,ec3,ec5,rsa2,rsa4, which are secp256r1,secp384r1,secp521r1,rsa2048,rsa4096
+log   | info | Case-insensitive. Log level: info,debug,trace
 
 4) Nginx configuration.
 ```
@@ -33,12 +34,32 @@ alg   | ec3 | Case-insensitive. Algorithm abbreviation: ec2,ec3,ec5,rsa2,rsa4, w
             try_files $uri =404;
         }
 
-        #location / {
-        #    rewrite ^/(.*)$ https://$http_host/$1 permanent;
-        #}       
+        location / {
+            rewrite ^/(.*)$ https://$http_host/$1 permanent;
+        }       
     }
 
-   
+    server {
+		listen 443 ssl http2;
+		server_name ai8.rs www.ai8.rs;
+
+		include ssl.conf; # Recommended SSL ciphers 
+
+		ssl_certificate /www/ai8.rs/.acme/chained.pem;
+		ssl_certificate_key /www/ai8.rs/.acme/domain.key;
+
+        real_ip_header X-Real-IP;
+		
+		location / {
+			proxy_set_header	X-Real-IP		$remote_addr;
+			proxy_set_header	X-Forwarded-For	$proxy_add_x_forwarded_for;
+			#proxy_set_header	Host			$http_host;
+			proxy_set_header	X-NginX-Proxy	true;
+			proxy_set_header	Connection		"";
+			proxy_http_version	1.1;
+			proxy_pass			https://bing.com;
+		}
+    }
 ```
 
 Parameter must match the nginx configuration. For example:
@@ -46,12 +67,17 @@ Parameter must match the nginx configuration. For example:
     ## dns=ai8.rs,www.ai8.rs
     server_name ai8.rs www.ai8.rs;
 
-    ## The /challenges/ directory is a fixed path
+    ## The "/challenges/" directory is a fixed path
     ## dir=/www/ai8.rs
     alias /www/ai8.rs/challenges/;
+
+    ## The files "/.acme/chained.pem" and "/.acme/domain.key" are at fixed paths
+    ## dir=/www/ai8.rs
+    ssl_certificate /www/ai8.rs/.acme/chained.pem;
+	ssl_certificate_key /www/ai8.rs/.acme/domain.key;
 ```
 
-Recommended SSL ciphers.
+Recommended SSL ciphers. Typically located at "ssl.conf" file. 
 ```
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_prefer_server_ciphers on;
