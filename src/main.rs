@@ -40,7 +40,7 @@ const TIP_MAX_TRY: &str = "Maximum attempts reached, exiting.";
 #[tokio::main]
 async fn main() {
 	// cargo test --test acme -- _acme --exact --show-output  dns=ai8.rs,www.ai8.rs dir=~/www/pengh/docker_conf/nginx/ssl/le/ai8.rs email=a@a.org ca=z
-	// cargo run -- dns=ai8.rs,www.ai8.rs dir=~/www/pengh/docker_conf/nginx/ssl/le/ai8.rs email=a@a.org ca=z
+	// cargo run -- dns=ai8.rs,www.ai8.rs dir=/Users/pengh/www/pengh/docker_conf/nginx/ssl/le/pengh.cn email=a@a.org ca=z
 	let args: Vec<String> = std::env::args().skip(1).collect(); // 获取所有的命令行参数，跳过第一个参数（程序路径）
 	dbg!(&args);
 
@@ -372,7 +372,7 @@ enum AcmeError {
 	ReqwestError(reqwest::Error),
 	IoError(std::io::Error),
 	SerdeJsonError(serde_json::Error),
-	Tip(String), // 示例自定义错误
+	Tip(String), // 自定义错误
 }
 
 impl From<reqwest::Error> for AcmeError {
@@ -396,7 +396,6 @@ enum Method {
 	POST,
 	GET,
 	HEAD,
-	POST_FORM,
 }
 
 #[derive(Debug)]
@@ -742,8 +741,11 @@ async fn _http_json(url: &str, body: Option<String>, method: Method) -> Result<r
 	let cb = match method {
 		Method::GET => client.get(url),
 		Method::HEAD => client.head(url),
-		Method::POST_FORM => client.post(url),
-		_ => client.post(url).body(body.unwrap()),
+		Method::PostForm => client.post(url),
+		_ => match body {
+			Some(body) => client.post(url).body(body),
+			_ => client.post(url),
+		},
 	};
 
 	let response = cb
@@ -789,7 +791,7 @@ async fn _new_nonce(url: &str) -> Result<String, AcmeError> {
 
 async fn _eab_email(url: &str, email: &str) -> Result<Eab, AcmeError> {
 	let url = format!("{}?email={}", url, email);
-	let res = _http_json(&url, None, Method::POST_FORM).await?.text().await?;
+	let res = _http_json(&url, None, Method::POST).await?.text().await?;
 	println!("{}", &res);
 	let eab: Eab = serde_json::from_str(&res).map_err(AcmeError::from)?;
 	if !eab.success {
