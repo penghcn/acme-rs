@@ -126,8 +126,13 @@ async fn _acme_run(cfg: AcmeCfg) -> Result<(), AcmeError> {
 	// 4.3 finalize csr
 	let _url = &_order_res.finalize.unwrap();
 	let _csr = _gen_csr_by_cmd_openssl(&cfg.acme_dir, alg_, &dns_)?;
-	let _nonce = _finalize_csr(_url, _mut_nonce_, &account_key_path_, &alg, &kid, _csr).await?;
+	let (_nonce,_c) = _finalize_csr(_url, _mut_nonce_, &account_key_path_, &alg, &kid, _csr).await?;
 	_mut_nonce_ = _nonce;
+
+	if let Some(_url) = _c {
+		_down_certificate(&_url, _mut_nonce_, &account_key_path_, &alg, &kid).await?;
+		return Ok(());
+	}
 
 	//轮询
 	let mut attempts: u8 = 0;
@@ -829,12 +834,14 @@ async fn _finalize_csr(
 	alg: &str,
 	kid: &str,
 	csr: String,
-) -> Result<String, AcmeError> {
+) -> Result<(String, Option<String>), AcmeError> {
 	let res = _post_kid(&url, nonce, file_path, alg, kid, Payload::_new_csr(csr)).await?;
 	let o = _get_header(REPLAY_NONCE, res.headers());
 	let res_str = res.text().await?;
 	println!("{}", res_str);
-	Ok(o)
+	let or_: OrderRes = serde_json::from_str(&res_str).unwrap();
+	let a = if or_.status == STATUS_OK { or_.certificate } else { None };
+	Ok((o, a))
 }
 
 async fn _down_certificate(url: &str, nonce: String, file_path: &str, alg: &str, kid: &str) -> Result<(), AcmeError> {
