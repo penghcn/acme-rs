@@ -57,7 +57,8 @@ const TIP_MAX_TRY: &str = "Maximum attempts reached, exiting.";
 const TIP_EAB_FAILED: &str = "Get Eab() Fialed.";
 
 const MAX_TRY: u8 = 8; //
-const SLEEP_DURATION: std::time::Duration = std::time::Duration::from_secs(2); //2s
+const SLEEP_DURATION_SEC_2: std::time::Duration = std::time::Duration::from_secs(2); //2s
+const SLEEP_DURATION_SEC_5: std::time::Duration = std::time::Duration::from_secs(5); //5s
 const LOG_LEVEL_DEAULT: LevelFilter = LevelFilter::Debug;
 
 // acme规范参考 https://datatracker.ietf.org/doc/html/rfc8555#section-7.2
@@ -183,7 +184,7 @@ async fn _acme_run(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError> 
 			if attempts == MAX_TRY {
 				return Err(AcmeError::Tip(TIP_MAX_TRY.to_string()));
 			}
-			let _ = std::thread::sleep(SLEEP_DURATION);
+			let _ = std::thread::sleep(SLEEP_DURATION_SEC_2);
 		}
 		let _ = fs::remove_file(&_well_known_path).map_err(|_| AcmeError::Tip(format!("Remove failed: {}", _well_known_path)));
 	}
@@ -213,7 +214,7 @@ async fn _acme_run(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError> 
 		if attempts == MAX_TRY {
 			return Err(AcmeError::Tip(TIP_MAX_TRY.to_string()));
 		}
-		let _ = std::thread::sleep(SLEEP_DURATION);
+		let _ = std::thread::sleep(SLEEP_DURATION_SEC_5);
 	}
 
 	// 4.4 down certificate
