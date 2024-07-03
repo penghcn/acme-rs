@@ -31,6 +31,7 @@ const DIR_CA_BUYPASS: &str = "/buypass";
 const DIR_CA_GOOGLE_TRUST: &str = "/goog/v02";
 
 const DIR_CHALLENGES: &str = "/challenges/";
+const DIR_ACME: &str = "/.acme";
 const DIR_BACKUP: &str = "/.backup";
 const PATH_CACHE_KID: &str = "/.cache_kid";
 const PATH_ACCOUNT_KEY: &str = "/account.key";
@@ -119,7 +120,12 @@ async fn _acme_run(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError> 
 	let acccount_alg_ = Alg::new(ACCOUNT_ALG_DEFAULT_EC2); //cfg.alg;
 	if let Err(_) = fs::read_to_string(&account_key_path_) {
 		let _ = _gen_key_by_cmd_openssl(&account_key_path_, &acccount_alg_);
-		fs::remove_file(format!("{0}{1}", cfg.acme_ca_dir, PATH_CACHE_KID))?; //同时删除cache_kid
+		let _kid_path = format!("{0}{1}", cfg.acme_ca_dir, PATH_CACHE_KID);
+		let _kid_path = Path::new(&_kid_path);
+		if _kid_path.exists() {
+			fs::remove_file(_kid_path)?; //同时删除cache_kid
+		}
+
 		info!("Step 3.1 Gen account key: {}", &account_key_path_);
 	} else {
 		info!("Use cache account key: {}", &account_key_path_);
@@ -456,11 +462,11 @@ impl AcmeCfg {
 		let ca = AcmeCa::new(map.get("ca").unwrap_or(&CA_DEFAULT_LE));
 		let domain_alg = Alg::new(map.get("alg").unwrap_or(&DOMAIN_ALG_DEFAULT_EC3));
 
-		let acme_dir = format!("{}/.acme", acme_root);
-		let acme_ca_dir = format!("{}{}", acme_dir, ca.ca_dir());
+		let acme_dir = format!("{0}{1}", acme_root, DIR_ACME);
+		let acme_ca_dir = format!("{0}{1}", acme_dir, ca.ca_dir());
 		let _path = Path::new(&acme_ca_dir);
 		if !_path.exists() {
-			debug!("Create path: {:?}", _path);
+			println!("Create path: {:?}", _path);
 			fs::create_dir_all(_path)?; // 递归创建目录
 		}
 
