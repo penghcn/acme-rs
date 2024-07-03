@@ -74,7 +74,7 @@ Parameter must match the nginx configuration. For example:
     ## The files "/.acme/chained.pem" and "/.acme/domain.key" are at fixed paths
     ## dir=/www/ai8.rs
     ssl_certificate /www/ai8.rs/.acme/chained.pem;
-	ssl_certificate_key /www/ai8.rs/.acme/domain.key;
+    ssl_certificate_key /www/ai8.rs/.acme/domain.key;
 ```
 
 Recommended SSL ciphers. Typically located at "ssl.conf" file. 
