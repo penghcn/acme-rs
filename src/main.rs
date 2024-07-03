@@ -31,9 +31,12 @@ const DIR_CA_BUYPASS: &str = "/buypass";
 const DIR_CA_GOOGLE_TRUST: &str = "/goog/v02";
 
 const DIR_CHALLENGES: &str = "/challenges/";
+const DIR_BACKUP: &str = "/.backup";
 const PATH_CACHE_KID: &str = "/.cache_kid";
 const PATH_ACCOUNT_KEY: &str = "/account.key";
 const PATH_DOMAIN_KEY: &str = "/domain.key";
+const PATH_DOMAIN_CRT: &str = "sign.crt";
+const PATH_CHAINED_CRT: &str = "chained.crt";
 
 const CA_DEFAULT_LE: &str = "le";
 const ACCOUNT_ALG_DEFAULT_EC2: &str = "EC2"; //acme接口签名等使用ecc256
@@ -211,7 +214,7 @@ async fn _acme_run(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError> 
 	if let None = _cert_url {
 		return Err(AcmeError::Tip(TIP_DOWN_CRT_FAILED.to_string()));
 	}
-	info!("Step 4.4 Download certificate file. Named sign.crt");
+	info!("Step 4.4 Download certificate file. Named {}", PATH_DOMAIN_CRT);
 	let _sign_crt = _down_certificate(&_cert_url.unwrap(), _mut_nonce_, &account_key_path_, &alg, &kid).await?;
 
 	info!("Step 4.5 Download ca intermediate file. Named intermediate.pem");
@@ -219,21 +222,24 @@ async fn _acme_run(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError> 
 	let _intermediate_pem = _http_json(&_intermediate_crt_url, None, Method::GET).await?.text().await?;
 
 	// 5.1、最后，合并sign.crt和intermediate.pem的内容成 chained.pem
-	let sign_crt_path_ = format!("{}/sign.crt", cfg.acme_dir);
-	let chained_pem_path_ = format!("{}/chained.crt", cfg.acme_dir);
-	info!("Step 5.1 Combine sign.crt and intermediate.pem: {}", &chained_pem_path_);
+	let sign_crt_path_ = format!("{}/{}", cfg.acme_dir, PATH_DOMAIN_CRT);
+	let chained_pem_path_ = format!("{}/{}", cfg.acme_dir, PATH_CHAINED_CRT);
+	info!(
+		"Step 5.1 Combine {} and intermediate.pem: {}",
+		PATH_DOMAIN_CRT, &chained_pem_path_
+	);
 
 	let _ = _write_to_file(&sign_crt_path_, &_sign_crt)?;
 	let _ = _write_to_file(&chained_pem_path_, &format!("{0}\n{1}", _sign_crt, _intermediate_pem))?;
 
 	// 5.2、复制小文件到备份目录
 	let _bk_no = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
-	let _backup_dir = format!("{}/.backup", cfg.acme_ca_dir);
-	info!("Step 5.2 Backup to : {}", &_backup_dir);
+	let _bk_dir = format!("{0}{1}", cfg.acme_ca_dir, DIR_BACKUP);
+	info!("Step 5.2 Backup to : {}", &_bk_dir);
 
-	let _ = fs::copy(&sign_crt_path_, format!("{}/{}.sign.crt", _bk_no, _backup_dir))?;
-	let _ = fs::copy(&chained_pem_path_, format!("{}/{}.chained.crt", _bk_no, _backup_dir))?;
-	let _ = fs::copy(&domain_key_path_, format!("{}/{}.{}", _bk_no, _backup_dir, PATH_DOMAIN_KEY))?;
+	let _ = fs::copy(&sign_crt_path_, format!("{}/{}.{}", _bk_no, _bk_dir, PATH_DOMAIN_CRT))?;
+	let _ = fs::copy(&chained_pem_path_, format!("{}/{}.{}", _bk_no, _bk_dir, PATH_CHAINED_CRT))?;
+	let _ = fs::copy(&domain_key_path_, format!("{}/{}.{}", _bk_no, _bk_dir, PATH_DOMAIN_KEY))?;
 
 	let result = (sign_crt_path_, chained_pem_path_, domain_key_path_);
 
