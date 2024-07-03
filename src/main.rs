@@ -58,7 +58,7 @@ const TIP_EAB_FAILED: &str = "Get Eab() Fialed.";
 
 const MAX_TRY: u8 = 8; //
 const SLEEP_DURATION_SEC_2: std::time::Duration = std::time::Duration::from_secs(2); //2s
-const SLEEP_DURATION_SEC_5: std::time::Duration = std::time::Duration::from_secs(5); //5s
+const SLEEP_DURATION_SEC_5: std::time::Duration = std::time::Duration::from_secs(15); //15s
 const LOG_LEVEL_DEAULT: LevelFilter = LevelFilter::Debug;
 
 // acme规范参考 https://datatracker.ietf.org/doc/html/rfc8555#section-7.2
@@ -1054,11 +1054,11 @@ async fn _finalize_csr(
 ) -> Result<(String, Option<OrderRes>), AcmeError> {
 	let res = _post_kid(&url, nonce, file_path, alg, kid, Payload::_new_csr(csr)).await?;
 	let o = _get_header(REPLAY_NONCE, res.headers());
-	//let res_str = &res.text().await?;
-	//debug!("{}", res_str);
+
 	let or_: Option<OrderRes> = if res.status().is_success() {
 		serde_json::from_str(&res.text().await?)?
 	} else {
+		debug!("{}", &res.text().await?);
 		None
 	};
 	//let a = if or_.status == STATUS_OK { or_.certificate } else { None };
