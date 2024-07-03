@@ -154,6 +154,7 @@ async fn _acme_run(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError> 
 				break;
 			}
 			attempts += 1;
+			debug!("Loop {}/{}, challenges domain", attempts, MAX_TRY);
 
 			if attempts == MAX_TRY {
 				return Err(AcmeError::Tip(TIP_MAX_TRY.to_string()));
@@ -181,6 +182,7 @@ async fn _acme_run(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError> 
 			break;
 		}
 		attempts += 1;
+		debug!("Loop {}/{}, finalize domain with csr", attempts, MAX_TRY);
 
 		if attempts == MAX_TRY {
 			return Err(AcmeError::Tip(TIP_MAX_TRY.to_string()));
