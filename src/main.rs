@@ -30,7 +30,11 @@ const DIR_CA_ZERO: &str = "/zerossl/v2/DV90";
 const DIR_CA_BUYPASS: &str = "/buypass";
 const DIR_CA_GOOGLE_TRUST: &str = "/goog/v02";
 
-const LACATION_CHALLENGES: &str = "/challenges/";
+const DIR_CHALLENGES: &str = "/challenges/";
+const PATH_CACHE_KID: &str = "/.cache_kid";
+const PATH_ACCOUNT_KEY: &str = "/account.key";
+const PATH_DOMAIN_KEY: &str = "/domain.key";
+
 const CA_DEFAULT_LE: &str = "le";
 const ACCOUNT_ALG_DEFAULT_EC2: &str = "EC2"; //acme接口签名等使用ecc256
 const DOMAIN_ALG_DEFAULT_EC3: &str = "EC3"; //dns默认使用ecc384算法
@@ -38,8 +42,6 @@ const ALG_HMAC_256: &str = "HS256";
 
 const CONTENT_TYPE_JSON: &str = "application/jose+json";
 const USER_AGENT: &str = "acme.rs";
-
-const CACHE_KID: &str = "/.cache_kid";
 
 const REPLAY_NONCE: &str = "replay-nonce";
 const TYPE_HTTP: &str = "http-01";
@@ -110,11 +112,11 @@ async fn _acme_run(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError> 
 
 	// 3
 	// 3.1 先获取或生成 account.key, 通过参数指定(参考enum Alg)， 目前支持 rsa2048,rsa4096,prime256v1,prime384v1,prime512v1
-	let account_key_path_ = format!("{}/account.key", cfg.acme_ca_dir);
+	let account_key_path_ = format!("{0}{1}", cfg.acme_ca_dir, PATH_ACCOUNT_KEY);
 	let acccount_alg_ = Alg::new(ACCOUNT_ALG_DEFAULT_EC2); //cfg.alg;
 	if let Err(_) = fs::read_to_string(&account_key_path_) {
 		let _ = _gen_key_by_cmd_openssl(&account_key_path_, &acccount_alg_);
-		fs::remove_file(format!("{0}{1}", cfg.acme_ca_dir, CACHE_KID))?; //同时删除cache_kid
+		fs::remove_file(format!("{0}{1}", cfg.acme_ca_dir, PATH_CACHE_KID))?; //同时删除cache_kid
 		info!("Step 3.1 Gen account key: {}", &account_key_path_);
 	} else {
 		info!("Use cache account key: {}", &account_key_path_);
@@ -231,7 +233,7 @@ async fn _acme_run(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError> 
 
 	let _ = fs::copy(&sign_crt_path_, format!("{}/{}.sign.crt", _bk_no, _backup_dir))?;
 	let _ = fs::copy(&chained_pem_path_, format!("{}/{}.chained.crt", _bk_no, _backup_dir))?;
-	let _ = fs::copy(&domain_key_path_, format!("{}/{}.domain.key", _bk_no, _backup_dir))?;
+	let _ = fs::copy(&domain_key_path_, format!("{}/{}.{}", _bk_no, _backup_dir, PATH_DOMAIN_KEY))?;
 
 	let result = (sign_crt_path_, chained_pem_path_, domain_key_path_);
 
@@ -410,10 +412,9 @@ impl Log for AcmeLogger {
 struct AcmeCfg {
 	dns: Vec<String>,
 	email: Option<String>,
-	acme_root: String,        //根目录，如 /www/ai8.rs
-	acme_dir: String,         //acme运行的目录，如 /www/ai8.rs/.acme
-	acme_ca_dir: String,      //acme运行的ca相关，如一些缓存，如 /www/ai8.rs/.acme/letsencrypt/v02
-	account_key_path: String, //acme运行的目录，如 /www/ai8.rs/.acme/account.key
+	acme_root: String,   //根目录，如 /www/ai8.rs
+	acme_dir: String,    //acme运行的目录，如 /www/ai8.rs/.acme
+	acme_ca_dir: String, //acme运行的ca相关，如一些缓存，如 /www/ai8.rs/.acme/letsencrypt/v02
 	ca: AcmeCa,
 	domain_alg: Alg,
 	log_level: LevelFilter,
@@ -450,7 +451,6 @@ impl AcmeCfg {
 		let domain_alg = Alg::new(map.get("alg").unwrap_or(&DOMAIN_ALG_DEFAULT_EC3));
 
 		let acme_dir = format!("{}/.acme", acme_root);
-		let account_key_path = format!("{}/account.key", acme_dir);
 		let acme_ca_dir = format!("{}{}", acme_dir, ca.ca_dir());
 		let _path = Path::new(&acme_ca_dir);
 		if !_path.exists() {
@@ -473,7 +473,6 @@ impl AcmeCfg {
 			acme_root,
 			acme_dir,
 			acme_ca_dir,
-			account_key_path,
 			ca,
 			domain_alg,
 			log_level,
@@ -938,7 +937,7 @@ async fn _new_acct(
 	//let payload_reg = "eyJ0ZXJtc09mU2VydmljZUFncmVlZCI6IHRydWV9"; //("termsOfServiceAgreed", true);
 	// protected='{"nonce": "5yfKMBJJlBFlOD5krHoGQPfcIGi-ad7Ri5bfCjM2Hnys1Q8WBD8", "url": "https://acme-v02.api.letsencrypt.org/acme/new-acct", "alg": "ES256", "jwk": {"crv": "P-256", "kty": "EC", "x": "JP6zfy5Fey4_6jt6J3Tcq-d5dlK05_4r17OKtMTm6bc", "y": "rDQt-nR5riRjwhDVx5D2IoZZZ9YDyWOaqE2P4GaY0UA"}}'
 	// let jwk_alg = _print_key_by_cmd_openssl(&file_path, is_ecc);
-	let _cache_path = format!("{0}{1}", &acme_ca_dir, CACHE_KID); //cache
+	let _cache_path = format!("{0}{1}", &acme_ca_dir, PATH_CACHE_KID); //cache
 	if let Ok(s) = fs::read_to_string(&_cache_path) {
 		debug!("Hit kid from cache:{}", _cache_path);
 		return Ok((nonce, s));
@@ -1013,7 +1012,7 @@ async fn _auth_domain(
 async fn _write_to_challenges(token: String, domain: &str, acme_dir: &str, thumbprint: &str) -> Result<String, AcmeError> {
 	let token = token.replace(r"[^A-Za-z0-9_\-]", "_");
 	let key_authorization = format!("{0}.{1}", token, thumbprint);
-	let well_known_path = format!("{}{}{}", acme_dir, LACATION_CHALLENGES, token);
+	let well_known_path = format!("{}{}{}", acme_dir, DIR_CHALLENGES, token);
 	let _ = _write_to_file(&well_known_path, &key_authorization)?;
 	let wellknown_url = format!("http://{0}/.well-known/acme-challenge/{1}", domain, token);
 	let ka = _http_json(&wellknown_url, None, Method::GET).await?.text().await?; // 自己先验一下
@@ -1113,7 +1112,7 @@ fn _gen_key_by_cmd_openssl(key_path: &str, alg: &Alg) -> Output {
 // cat /etc/ssl/openssl.cnf openssl.cnf.1.tmp > openssl.cnf.tmp
 // openssl req -new -key domain.key -subj "/" -reqexts SAN -config openssl.cnf.tmp  > domain.csr
 fn _gen_csr_by_cmd_openssl(acme_dir: &str, domain_key_alg: &Alg, dns: &Vec<String>) -> Result<(String, String), AcmeError> {
-	let domain_key_path = format!("{}/domain.key", acme_dir);
+	let domain_key_path = format!("{0}{1}", acme_dir, PATH_DOMAIN_KEY);
 	let domain_csr_path = format!("{}/domain.csr", acme_dir);
 	let tmp = format!("{}/openssl.cnf.tmp", acme_dir);
 
