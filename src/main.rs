@@ -1,6 +1,6 @@
 use base64::{engine::general_purpose::URL_SAFE, Engine as _};
 use hmac::{Hmac, Mac};
-use log::{debug, info, trace, Level, Log, Record};
+use log::{debug, info, trace, Level, LevelFilter, Log, Record};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -43,6 +43,7 @@ const TIP_EAB_FAILED: &str = "Get Eab() Fialed.";
 
 const MAX_TRY: u8 = 8; //
 const SLEEP_DURATION: std::time::Duration = std::time::Duration::from_secs(2); //2s
+const LOG_LEVEL_DEAULT: LevelFilter = LevelFilter::Debug;
 
 // acme规范参考 https://datatracker.ietf.org/doc/html/rfc8555#section-7.2
 #[tokio::main]
@@ -340,13 +341,17 @@ impl Log for AcmeLogger {
 
 	fn log(&self, record: &Record) {
 		if self.enabled(record.metadata()) {
+			let f = record
+				.file()
+				.map(|f| std::path::Path::new(f).file_name().and_then(|s| s.to_str()).unwrap_or(""))
+				.unwrap_or("unknown file");
+			if f == "connect.rs" {
+				return;
+			}
 			let msg = format!(
 				"{:5} [{}:{}] - {}",
 				record.level(),
-				record
-					.file()
-					.map(|f| std::path::Path::new(f).file_name().and_then(|s| s.to_str()).unwrap_or(""))
-					.unwrap_or("unknown file"),
+				f,
 				record.line().unwrap_or(0),
 				record.args()
 			);
@@ -366,7 +371,7 @@ struct AcmeCfg {
 	ca: AcmeCa,
 	account_key_path: String,
 	alg: Alg,
-	log_level: log::LevelFilter,
+	log_level: LevelFilter,
 }
 
 impl AcmeCfg {
@@ -411,11 +416,11 @@ impl AcmeCfg {
 
 		let log_level = match map.get("log") {
 			Some(level) => match level.to_lowercase().as_str() {
-				"debug" => log::LevelFilter::Debug,
-				"trace" => log::LevelFilter::Trace,
-				_ => log::LevelFilter::Info,
+				"debug" => LevelFilter::Debug,
+				"trace" => LevelFilter::Trace,
+				_ => LOG_LEVEL_DEAULT,
 			},
-			_ => log::LevelFilter::Info,
+			_ => LOG_LEVEL_DEAULT,
 		};
 
 		Ok(AcmeCfg {
