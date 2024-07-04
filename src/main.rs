@@ -10,7 +10,7 @@ use std::{
 	io::Write,
 	path::Path,
 	process::{Command, Output, Stdio},
-	time::{SystemTime, UNIX_EPOCH},
+	time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 const URL_LE: &str = "https://acme-v02.api.letsencrypt.org/directory";
@@ -46,6 +46,7 @@ const ALG_HMAC_256: &str = "HS256";
 
 const CONTENT_TYPE_JSON: &str = "application/jose+json";
 const USER_AGENT: &str = "acme.rs";
+const TIMEOUT_SEC_10: Duration = Duration::from_secs(10); //10s
 
 const REPLAY_NONCE: &str = "replay-nonce";
 const TYPE_HTTP: &str = "http-01";
@@ -54,13 +55,14 @@ const STATUS_OK: &str = "valid"; //valid. pending, ready, processing. invalid
 const TIP_REQUIRED_EMAIL: &str = "Required email, add param like: email=a@a.org";
 const TIP_DOWN_CRT_FAILED: &str = "Download certificate failed, exiting.";
 const TIP_MAX_TRY: &str = "Maximum attempts reached, exiting.";
-const TIP_EAB_FAILED: &str = "Get Eab() Fialed.";
+const TIP_EAB_FAILED: &str = "Get Eab Fialed.";
+const TIP_ACCOUNT_FAILED: &str = "Register account Fialed.";
 
-const CACHE_EXPIRE_DAY: u64 = 60 * 60 * 24 * 7; //时间戳，7天过期
+const CACHE_EXPIRE_DAY: u64 = 7; //7天过期
 const CACHE_EXPIRE_SEC: u64 = 60 * 60 * 24 * CACHE_EXPIRE_DAY; //时间戳，7天过期
 const MAX_TRY: u8 = 8; //
-const SLEEP_DURATION_SEC_2: std::time::Duration = std::time::Duration::from_secs(2); //2s
-const SLEEP_DURATION_SEC_5: std::time::Duration = std::time::Duration::from_secs(15); //15s
+const SLEEP_DURATION_SEC_2: Duration = Duration::from_secs(2); //2s
+const SLEEP_DURATION_SEC_15: Duration = Duration::from_secs(15); //15s
 const LOG_LEVEL_DEAULT: LevelFilter = LevelFilter::Debug;
 
 // acme规范参考 https://datatracker.ietf.org/doc/html/rfc8555#section-7.2
@@ -102,7 +104,7 @@ async fn main() {
 async fn _acme_run(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError> {
 	// 0 初始化参数，获取或者默认值
 	info!("Step 1 Init Params: {:?}", cfg);
-	let dns_ = cfg.dns;
+	let dns_ = &cfg.dns;
 
 	// 1 init获取接口  /directory
 	let _dir = _directory(cfg.ca.directory_url()).await?;
@@ -140,17 +142,7 @@ async fn _acme_run(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError> 
 	// 3.2 注册账号接口 /acme/new-acct
 	//let email = if external_account_required { cfg.email } else { None };
 	//let email = cfg.email.filter(|_| external_account_required);
-	let (_nonce, kid) = _new_acct(
-		_dir.new_account,
-		_nonce,
-		cfg.email,
-		cfg.ca.eab_url(),
-		&cfg.acme_ca_dir,
-		&account_key_path_,
-		&alg,
-		jwk,
-	)
-	.await?;
+	let (_nonce, kid) = _new_acct(_dir.new_account, _nonce, &cfg, &account_key_path_, &alg, jwk).await?;
 	info!("Step 3.2 POST account. {}", _nonce);
 
 	// 4 下单 -> 验证每个域名 -> 验证每个域名
@@ -217,7 +209,7 @@ async fn _acme_run(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError> 
 		if attempts == MAX_TRY {
 			return Err(AcmeError::Tip(TIP_MAX_TRY.to_string()));
 		}
-		let _ = std::thread::sleep(SLEEP_DURATION_SEC_5);
+		let _ = std::thread::sleep(SLEEP_DURATION_SEC_15);
 	}
 
 	// 4.4 down certificate
@@ -410,7 +402,7 @@ impl Log for AcmeLogger {
 		if self.enabled(record.metadata()) {
 			let f = record
 				.file()
-				.map(|f| std::path::Path::new(f).file_name().and_then(|s| s.to_str()).unwrap_or(""))
+				.map(|f| Path::new(f).file_name().and_then(|s| s.to_str()).unwrap_or(""))
 				.unwrap_or("unknown file");
 			if f == "connect.rs" {
 				return;
@@ -439,6 +431,7 @@ struct AcmeCfg {
 	ca: AcmeCa,
 	domain_alg: Alg,
 	log_level: LevelFilter,
+	eab: Eab,
 }
 
 impl AcmeCfg {
@@ -488,6 +481,10 @@ impl AcmeCfg {
 			_ => LOG_LEVEL_DEAULT,
 		};
 
+		let eab_kid = map.get("eab_kid").map(|s| s.to_string());
+		let eab_hmac_key = map.get("eab_hmac_key").map(|s| s.to_string());
+		let eab = Eab::new(eab_kid, eab_hmac_key);
+
 		Ok(AcmeCfg {
 			dns,
 			email,
@@ -497,6 +494,7 @@ impl AcmeCfg {
 			ca,
 			domain_alg,
 			log_level,
+			eab,
 		})
 	}
 }
@@ -581,15 +579,28 @@ struct DirectoryMeta {
 	external_account_required: Option<bool>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 struct Eab {
 	success: bool,
 	error: Option<EabError>,
 	eab_kid: Option<String>,
 	eab_hmac_key: Option<String>,
 }
+impl Eab {
+	fn new(eab_kid: Option<String>, eab_hmac_key: Option<String>) -> Self {
+		Eab {
+			success: eab_kid.is_some() & eab_hmac_key.is_some(),
+			eab_kid,
+			eab_hmac_key,
+			error: None,
+		}
+	}
+	fn _clone(eab: &Eab) -> Option<Self> {
+		Some(Self::new(eab.eab_kid.clone(), eab.eab_hmac_key.clone()))
+	}
+}
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 struct EabError {
 	code: u32,
 	#[serde(rename(deserialize = "type"))]
@@ -753,7 +764,7 @@ impl Payload {
 			csr: None,
 		})
 	}
-	fn _new_acct_with_eab(email: String, external_account_binding: Option<SigBody>) -> Option<Self> {
+	fn _new_acct_with_eab(email: &str, external_account_binding: Option<SigBody>) -> Option<Self> {
 		Some(Payload {
 			identifiers: None,
 			csr: None,
@@ -892,6 +903,7 @@ async fn _http_json(url: &str, body: Option<String>, method: Method) -> Result<r
 	let response = cb
 		.header("Content-Type", CONTENT_TYPE_JSON)
 		.header("User-Agent", USER_AGENT)
+		.timeout(TIMEOUT_SEC_10)
 		.send()
 		.await
 		.map_err(AcmeError::from)?;
@@ -913,7 +925,7 @@ async fn _http_json(url: &str, body: Option<String>, method: Method) -> Result<r
 async fn _directory(url: String) -> Result<Directory, AcmeError> {
 	let res = _http_json(&url, None, Method::GET).await?.text().await?;
 	trace!("Directory: {}", res);
-	let dir: Directory = serde_json::from_str(&res).map_err(AcmeError::from)?;
+	let dir: Directory = serde_json::from_str(&res)?;
 	Ok(dir)
 }
 
@@ -931,7 +943,7 @@ async fn _new_nonce(url: &str) -> Result<String, AcmeError> {
 	Ok(_get_header(REPLAY_NONCE, res.headers()))
 }
 
-async fn _eab_email(url: &str, email: &str, acme_ca_dir: &str) -> Result<Eab, AcmeError> {
+async fn _eab_email(url: &str, email: &str, acme_ca_dir: &str) -> Result<Option<Eab>, AcmeError> {
 	//cache
 	let _cache_path = format!("{}/.cache_{}.eab", acme_ca_dir, email);
 	let res = if let Some(s) = _read_cache(&_cache_path) {
@@ -944,34 +956,40 @@ async fn _eab_email(url: &str, email: &str, acme_ca_dir: &str) -> Result<Eab, Ac
 		res
 	};
 
-	let eab: Eab = serde_json::from_str(&res).map_err(AcmeError::from)?;
+	let eab: Eab = serde_json::from_str(&res)?;
 	if !eab.success {
 		return Err(AcmeError::Tip(TIP_EAB_FAILED.to_string()));
 	}
-	Ok(eab)
+	Ok(Some(eab))
 }
 
 async fn _new_acct(
 	url: String,
 	nonce: String,
-	email: Option<String>,
-	eab_url: Option<String>,
-	acme_ca_dir: &str,
-	account_key_path: &str,
+	cfg: &AcmeCfg,
+	ak_path: &str,
 	alg: &str,
 	jwk: Jwk,
 ) -> Result<(String, String), AcmeError> {
 	//let payload_reg = "eyJ0ZXJtc09mU2VydmljZUFncmVlZCI6IHRydWV9"; //("termsOfServiceAgreed", true);
 	// protected='{"nonce": "5yfKMBJJlBFlOD5krHoGQPfcIGi-ad7Ri5bfCjM2Hnys1Q8WBD8", "url": "https://acme-v02.api.letsencrypt.org/acme/new-acct", "alg": "ES256", "jwk": {"crv": "P-256", "kty": "EC", "x": "JP6zfy5Fey4_6jt6J3Tcq-d5dlK05_4r17OKtMTm6bc", "y": "rDQt-nR5riRjwhDVx5D2IoZZZ9YDyWOaqE2P4GaY0UA"}}'
 	// let jwk_alg = _print_key_by_cmd_openssl(&file_path, is_ecc);
+	let acme_ca_dir = &cfg.acme_ca_dir;
 	let _cache_path = format!("{0}{1}", &acme_ca_dir, PATH_CACHE_KID); //cache
 	if let Some(s) = _read_cache(&_cache_path) {
 		return Ok((nonce, s));
 	}
+	let eab = &cfg.eab;
 
-	let payload = if let Some(email) = email {
-		let osb = if let Some(eab_url) = eab_url {
-			let eab = _eab_email(&eab_url, &email, &acme_ca_dir).await?;
+	let payload = if let Some(email) = &cfg.email {
+		let eab = if eab.success {
+			Eab::_clone(eab)
+		} else if let Some(eab_url) = &cfg.ca.eab_url() {
+			_eab_email(&eab_url, &email, &acme_ca_dir).await?
+		} else {
+			None
+		};
+		let osb = if let Some(eab) = eab {
 			let eab_payload64 = _base64(jwk.to_string().as_bytes());
 			Some(SigBody::new(
 				eab_payload64,
@@ -990,9 +1008,14 @@ async fn _new_acct(
 	};
 
 	let protected = Protected::from(&url, nonce, alg, jwk);
-	let sig_body = SigBody::from(payload, protected, account_key_path);
+	let sig_body = SigBody::from(payload, protected, ak_path);
 
 	let res = _http_json(&url, sig_body.to_string(), Method::POST).await?;
+	if !res.status().is_success() {
+		debug!("{}", &res.text().await?);
+		return Err(AcmeError::Tip(TIP_ACCOUNT_FAILED.to_string()));
+	};
+
 	let (nonce, kid) = (
 		_get_header(REPLAY_NONCE, res.headers()),
 		_get_header("location", res.headers()),
@@ -1016,7 +1039,7 @@ async fn _new_order(
 	let location = _get_header("Location", res.headers());
 	let res_str = res.text().await?;
 	debug!("{}", &res_str);
-	let or_: OrderRes = serde_json::from_str(&res_str).unwrap();
+	let or_: OrderRes = serde_json::from_str(&res_str)?;
 	Ok((o, location, or_))
 }
 
@@ -1031,7 +1054,7 @@ async fn _auth_domain(
 	let res = _post_kid(&url, nonce, file_path, alg, kid, Payload::_new_authz()).await?;
 	let o = _get_header(REPLAY_NONCE, res.headers());
 	let res_str = res.text().await?;
-	let or_: OrderRes = serde_json::from_str(&res_str).unwrap();
+	let or_: OrderRes = serde_json::from_str(&res_str)?;
 	Ok((o, or_))
 }
 
@@ -1053,7 +1076,7 @@ async fn _chall_domain(url: &str, nonce: String, file_path: &str, alg: &str, kid
 	let res = _post_kid(&url, nonce, file_path, alg, kid, Payload::_new_chall()).await?;
 	let o = _get_header(REPLAY_NONCE, res.headers());
 	let res_str = res.text().await?;
-	let or_: OrderResChall = serde_json::from_str(&res_str).unwrap();
+	let or_: OrderResChall = serde_json::from_str(&res_str)?;
 	Ok((o, or_.status == STATUS_OK))
 }
 
