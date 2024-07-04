@@ -245,6 +245,11 @@ async fn _acme_run(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError> 
 	// 5.2、复制小文件到备份目录
 	let _bk_no = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
 	let _bk_dir = format!("{0}{1}", cfg.acme_ca_dir, DIR_BACKUP);
+	let _path = Path::new(&_bk_dir);
+	if !_path.exists() {
+		debug!("Create path: {:?}", _path);
+		fs::create_dir_all(_path)?; // 递归创建目录
+	}
 	info!("Step 5.2 Backup to : {}", &_bk_dir);
 
 	let _ = fs::copy(&sign_crt_path_, format!("{}/{}.{}", _bk_dir, _bk_no, PATH_DOMAIN_CRT))?;
