@@ -1,4 +1,4 @@
 # rustfmt.toml
 max_width = 128
-hard_tabs = true
+#hard_tabs = true
 tab_spaces = 4
