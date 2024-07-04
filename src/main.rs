@@ -56,6 +56,8 @@ const TIP_DOWN_CRT_FAILED: &str = "Download certificate failed, exiting.";
 const TIP_MAX_TRY: &str = "Maximum attempts reached, exiting.";
 const TIP_EAB_FAILED: &str = "Get Eab() Fialed.";
 
+const CACHE_EXPIRE_DAY: u64 = 60 * 60 * 24 * 7; //时间戳，7天过期
+const CACHE_EXPIRE_SEC: u64 = 60 * 60 * 24 * CACHE_EXPIRE_DAY; //时间戳，7天过期
 const MAX_TRY: u8 = 8; //
 const SLEEP_DURATION_SEC_2: std::time::Duration = std::time::Duration::from_secs(2); //2s
 const SLEEP_DURATION_SEC_5: std::time::Duration = std::time::Duration::from_secs(15); //15s
@@ -90,9 +92,9 @@ async fn main() {
 				chained_pem_path_, domain_key_path_
 			);
 			info!(
-				"\nFor Apache configuration:\nSSLEngine on\nSSLCertificateFile {0}\nSSLCertificateKeyFile {1}\nSSLCertificateChainFile {2}",
-				sign_crt_path_, chained_pem_path_, domain_key_path_
-			);
+                "\nFor Apache configuration:\nSSLEngine on\nSSLCertificateFile {0}\nSSLCertificateKeyFile {1}\nSSLCertificateChainFile {2}",
+                sign_crt_path_, chained_pem_path_, domain_key_path_
+            );
 		}
 	}
 }
@@ -119,17 +121,15 @@ async fn _acme_run(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError> 
 	// 3.1 先获取或生成 account.key, 通过参数指定(参考enum Alg)， 目前支持 rsa2048,rsa4096,prime256v1,prime384v1,prime512v1
 	let account_key_path_ = format!("{0}{1}", cfg.acme_ca_dir, PATH_ACCOUNT_KEY);
 	let acccount_alg_ = Alg::new(ACCOUNT_ALG_DEFAULT_EC2); //cfg.alg;
-	if let Err(_) = fs::read_to_string(&account_key_path_) {
-		let _ = _gen_key_by_cmd_openssl(&account_key_path_, &acccount_alg_);
-		let _kid_path = format!("{0}{1}", cfg.acme_ca_dir, PATH_CACHE_KID);
-		let _kid_path = Path::new(&_kid_path);
-		if _kid_path.exists() {
-			fs::remove_file(_kid_path)?; //同时删除cache_kid
-		}
 
+	if _read_cache(&account_key_path_).is_none() {
+		let _ = _gen_key_by_cmd_openssl(&account_key_path_, &acccount_alg_);
+		let _kid_cache_path = format!("{0}{1}", cfg.acme_ca_dir, PATH_CACHE_KID);
+		let _kid_cache_path = Path::new(&_kid_cache_path);
+		if _kid_cache_path.exists() {
+			fs::remove_file(_kid_cache_path)?; //同时删除cache_kid
+		}
 		info!("Step 3.1 Gen account key: {}", &account_key_path_);
-	} else {
-		info!("Use cache account key: {}", &account_key_path_);
 	}
 
 	let jwk = _print_key_by_cmd_openssl(&account_key_path_, acccount_alg_.is_ecc());
@@ -497,6 +497,7 @@ impl AcmeCfg {
 enum AcmeError {
 	ReqwestError(reqwest::Error),
 	IoError(std::io::Error),
+	TimeError(std::time::SystemTimeError),
 	SerdeJsonError(serde_json::Error),
 	Tip(String), // 自定义错误
 }
@@ -509,6 +510,12 @@ impl From<reqwest::Error> for AcmeError {
 impl From<std::io::Error> for AcmeError {
 	fn from(error: std::io::Error) -> Self {
 		AcmeError::IoError(error)
+	}
+}
+
+impl From<std::time::SystemTimeError> for AcmeError {
+	fn from(error: std::time::SystemTimeError) -> Self {
+		AcmeError::TimeError(error)
 	}
 }
 impl From<serde_json::Error> for AcmeError {
@@ -885,10 +892,10 @@ async fn _http_json(url: &str, body: Option<String>, method: Method) -> Result<r
 	debug!("<== Response: {}, header: {:?}", c, response.headers());
 
 	// if !response.status().is_success() {
-	// 	debug!("{}", response.text().await?);
-	// 	Err(AcmeError::Tip(format!("{}Error", c)))
+	//     debug!("{}", response.text().await?);
+	//     Err(AcmeError::Tip(format!("{}Error", c)))
 	// } else {
-	// 	Ok(response)
+	//     Ok(response)
 	// }
 	Ok(response)
 }
@@ -919,8 +926,7 @@ async fn _new_nonce(url: &str) -> Result<String, AcmeError> {
 async fn _eab_email(url: &str, email: &str, acme_ca_dir: &str) -> Result<Eab, AcmeError> {
 	//cache
 	let _cache_path = format!("{}/.cache_{}.eab", acme_ca_dir, email);
-	let res = if let Ok(s) = fs::read_to_string(&_cache_path) {
-		debug!("Hit eab from cache:{}", _cache_path);
+	let res = if let Some(s) = _read_cache(&_cache_path) {
 		s
 	} else {
 		let url = format!("{}?email={}", url, email);
@@ -951,8 +957,7 @@ async fn _new_acct(
 	// protected='{"nonce": "5yfKMBJJlBFlOD5krHoGQPfcIGi-ad7Ri5bfCjM2Hnys1Q8WBD8", "url": "https://acme-v02.api.letsencrypt.org/acme/new-acct", "alg": "ES256", "jwk": {"crv": "P-256", "kty": "EC", "x": "JP6zfy5Fey4_6jt6J3Tcq-d5dlK05_4r17OKtMTm6bc", "y": "rDQt-nR5riRjwhDVx5D2IoZZZ9YDyWOaqE2P4GaY0UA"}}'
 	// let jwk_alg = _print_key_by_cmd_openssl(&file_path, is_ecc);
 	let _cache_path = format!("{0}{1}", &acme_ca_dir, PATH_CACHE_KID); //cache
-	if let Ok(s) = fs::read_to_string(&_cache_path) {
-		debug!("Hit kid from cache:{}", _cache_path);
+	if let Some(s) = _read_cache(&_cache_path) {
 		return Ok((nonce, s));
 	}
 
@@ -1264,4 +1269,34 @@ fn _regx(out: &str, reg: &str, need_rep: bool) -> String {
 		return p.replace(":", "").replace("\n", "").replace(" ", "");
 	}
 	p.to_string()
+}
+
+fn _read_cache(_cache_path: &str) -> Option<String> {
+	if let Err(e) = _cache_expire_then_rm(&_cache_path) {
+		debug!("Ignore expire cache error: {:?}", e);
+		return None;
+	}
+
+	match fs::read_to_string(&_cache_path) {
+		Ok(s) => {
+			debug!("Hit cache: {}", _cache_path);
+			Some(s)
+		}
+		Err(_) => None,
+	}
+}
+
+fn _cache_expire_then_rm(file_path: &str) -> Result<(), AcmeError> {
+	let path = Path::new(file_path);
+	let modified_time = fs::metadata(path)?.modified()?.duration_since(UNIX_EPOCH)?.as_secs();
+	let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+	if modified_time + CACHE_EXPIRE_SEC < now {
+		debug!(
+			"Cache expired. File modified > {} days, then rm: {}",
+			CACHE_EXPIRE_DAY, &file_path
+		);
+		fs::remove_file(path)?;
+	}
+	Ok(())
+	//Ok(modified_time + CACHE_EXPIRE_SEC < now)
 }
