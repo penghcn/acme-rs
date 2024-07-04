@@ -482,7 +482,7 @@ impl AcmeCfg {
 		};
 
 		let eab_kid = map.get("eab_kid").map(|s| s.to_string());
-		let eab_hmac_key = map.get("eab_hmac_key").map(|s| s.to_string());
+		let eab_hmac_key = map.get("eab_key").map(|s| s.to_string());
 		let eab = Eab::new(eab_kid, eab_hmac_key);
 
 		Ok(AcmeCfg {

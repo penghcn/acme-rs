@@ -16,12 +16,14 @@ cargo run --  dns=ai8.rs,www.ai8.rs dir=/www/ai8.rs ca=z email=a@a.rs alg=ec5
 
 key | default | description
 -|-|-
-dns   | -    | Required, single or multiple, separated by commas. For example: ai8.rs,www.ai8.rs
-dir   | -    | Required, acme root path, must match your nginx config, e.g. /www/ai8.rs
-email | -    | Register account email. When ca is ZeroSSL, email required
-ca    | le   | Case-insensitive. The defalut is "le", which stands for Let's Encrypt. ZeroSSL can be abbreviated as "Z","z","zero". Google Trust as "g". BuyPass as "b"
-alg   | ec3  | Case-insensitive. Algorithm abbreviation: ec2,ec3,ec5,rsa2,rsa4, which are secp256r1,secp384r1,secp521r1,rsa2048,rsa4096
-log   | info | Case-insensitive. Log level: info,debug,trace
+dns     | -    | Required, single or multiple, separated by commas. For example: ai8.rs,www.ai8.rs
+dir     | -    | Required, acme root path, must match your nginx config, e.g. /www/ai8.rs
+email   | -    | Register account email
+eab_kid | -    | eab_kid
+eab_key | -    | eab_hmac_key
+ca      | le   | Case-insensitive. The defalut is "le", which stands for Let's Encrypt. ZeroSSL can be abbreviated as "Z","z","zero". Google Trust as "g". BuyPass as "b"
+alg     | ec3  | Case-insensitive. Algorithm abbreviation: ec2,ec3,ec5,rsa2,rsa4, which are secp256r1,secp384r1,secp521r1,rsa2048,rsa4096
+log     | info | Case-insensitive. Log level: info,debug,trace
 
 4) Nginx configuration.
 ```
