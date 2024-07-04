@@ -1,6 +1,6 @@
 use base64::{engine::general_purpose::URL_SAFE, Engine as _};
 use hmac::{Hmac, Mac};
-use log::{debug, info, trace, Level, LevelFilter, Log, Record};
+use log::{debug, info, trace, warn, Level, LevelFilter, Log, Record};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -85,7 +85,7 @@ async fn main() {
 	// ssl_certificate .../le_ssl_chained.pem;
 	// ssl_certificate_key .../le_ssl_domain.key;
 	match _acme_run(_cfg).await {
-		Err(_e) => println!("{:?}", _e),
+		Err(_e) => warn!("{:?}", _e),
 		Ok((sign_crt_path_, chained_pem_path_, domain_key_path_)) => {
 			info!(
 				"Successfully.\nFor Nginx configuration:\nssl_certificate {0}\nssl_certificate_key {1}",
@@ -193,7 +193,10 @@ async fn _acme_run(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError> 
 	let _url = &_order_res.finalize.unwrap();
 	let (_csr, domain_key_path_) = _gen_csr_by_cmd_openssl(&cfg.acme_dir, &cfg.domain_alg, &dns_)?;
 
-	info!("Step 4.3 Finalize domain with csr. Gen domain key: {}", &domain_key_path_);
+	info!(
+		"Step 4.3 Finalize domain with csr. Gen domain key by {:?}: {}",
+		&cfg.domain_alg, &domain_key_path_
+	);
 
 	//轮询
 	let mut attempts: u8 = 0;
@@ -244,9 +247,9 @@ async fn _acme_run(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError> 
 	let _bk_dir = format!("{0}{1}", cfg.acme_ca_dir, DIR_BACKUP);
 	info!("Step 5.2 Backup to : {}", &_bk_dir);
 
-	let _ = fs::copy(&sign_crt_path_, format!("{}/{}.{}", _bk_no, _bk_dir, PATH_DOMAIN_CRT))?;
-	let _ = fs::copy(&chained_pem_path_, format!("{}/{}.{}", _bk_no, _bk_dir, PATH_CHAINED_CRT))?;
-	let _ = fs::copy(&domain_key_path_, format!("{}/{}.{}", _bk_no, _bk_dir, PATH_DOMAIN_KEY))?;
+	let _ = fs::copy(&sign_crt_path_, format!("{}/{}.{}", _bk_dir, _bk_no, PATH_DOMAIN_CRT))?;
+	let _ = fs::copy(&chained_pem_path_, format!("{}/{}.{}", _bk_dir, _bk_no, PATH_CHAINED_CRT))?;
+	let _ = fs::copy(&domain_key_path_, format!("{}/{}.{}", _bk_dir, _bk_no, PATH_DOMAIN_KEY))?;
 
 	let result = (sign_crt_path_, chained_pem_path_, domain_key_path_);
 
@@ -1135,7 +1138,7 @@ fn _gen_csr_by_cmd_openssl(acme_dir: &str, domain_key_alg: &Alg, dns: &Vec<Strin
 	let tmp = format!("{}/openssl.cnf.tmp", acme_dir);
 
 	let _ = _gen_key_by_cmd_openssl(&domain_key_path, &domain_key_alg);
-	trace!("Successfully. Gen domain key: {}", &domain_key_path);
+	trace!("Successfully. Gen domain key by {:?}: {}", &domain_key_alg, &domain_key_path);
 
 	let openssl_cnf = fs::read_to_string("/etc/ssl/openssl.cnf")?;
 	let dns_san = dns.iter().map(|_d| format!("DNS:{}", _d)).collect::<Vec<String>>().join(",");
