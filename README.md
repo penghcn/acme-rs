@@ -1,5 +1,5 @@
 ## Usage
-1)  The default CA (Certificate Authority) is Let's Encrypt, and the default domain algorithm is EC3, which is secp384r1.
+1)  The default CA is Let's Encrypt, and the default domain algorithm is EC3, which is secp384r1.
 ```
 git clone https://github.com/penghcn/acme-rs.git
 cd acme-rs/
