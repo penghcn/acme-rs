@@ -31,7 +31,7 @@ const DIR_CA_GOOGLE_TRUST: &str = "/goog/v02";
 const DIR_CHALLENGES: &str = "/challenges/";
 const DIR_ACME: &str = "/.acme";
 const DIR_BACKUP: &str = "/.backup";
-const PATH_CACHE_KID: &str = "/.cache_kid";
+const PATH_CACHE_KID: &str = "/.cache.kid";
 const PATH_ACCOUNT_KEY: &str = "/account.key";
 
 const DOMAIN_KEY: &str = "domain.key";
@@ -52,16 +52,20 @@ const HEADER_LOCATION: &str = "location";
 const TYPE_HTTP: &str = "http-01";
 const STATUS_OK: &str = "valid"; //valid. pending, ready, processing. invalid
 
+const TIP_MISSING_DNS: &str = "Missing parameter 'dns'";
+const TIP_MISSING_DIR: &str = "Missing parameter 'dir'";
+const TIP_INVALID_DNS: &str = "Wildcard domain names like *.a.com are not supported. Exactly, such as: dns=ai8.rs,www.ai8.rs";
 const TIP_REQUIRED_EMAIL: &str = "Required email, add param like: email=a@a.org";
 const TIP_DOWN_CRT_FAILED: &str = "Download certificate failed, exiting.";
 const TIP_MAX_TRY: &str = "Maximum attempts reached, exiting.";
 const TIP_EAB_FAILED: &str = "Get Eab Fialed.";
+const TIP_TYPE_HTTP_FAILED: &str = "Get challenges http-01 Fialed.";
 
 const CACHE_EXPIRE_DAY: u64 = 7; //7天过期
 const CACHE_EXPIRE_SEC: u64 = 60 * 60 * 24 * CACHE_EXPIRE_DAY; //时间戳，7天过期
 const MAX_TRY: u8 = 8; //
 const SLEEP_DURATION_SEC_2: Duration = Duration::from_secs(2); //2s
-const SLEEP_DURATION_SEC_15: Duration = Duration::from_secs(15); //15s
+const SLEEP_DURATION_SEC_5: Duration = Duration::from_secs(5); //5s
 const LOG_LEVEL_DEAULT: LevelFilter = LevelFilter::Debug;
 
 // acme规范参考 https://datatracker.ietf.org/doc/html/rfc8555#section-7.2
@@ -123,9 +127,9 @@ async fn acme_run(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError> {
         let kid_cache_path = format!("{0}{1}", cfg.acme_ca_dir, PATH_CACHE_KID);
         let kid_cache_path = Path::new(&kid_cache_path);
         if kid_cache_path.exists() {
-            fs::remove_file(kid_cache_path)?; //同时删除cache_kid
+            fs::remove_file(kid_cache_path)?; //同时删除cache.kid
         }
-        info!("Step 3.1 Gen account key: {}", &account_key_path);
+        info!("Step 3.1 Gen account key by {:?}: {}", &acccount_alg, &account_key_path);
     }
 
     let jwk = _print_key_by_cmd_openssl(&account_key_path, acccount_alg.is_ecc());
@@ -141,12 +145,12 @@ async fn acme_run(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError> {
     //let email = if external_account_required { cfg.email } else { None };
     //let email = cfg.email.filter(|_| external_account_required);
     let (nonce, kid) = _new_acct(dir.new_account, nonce, &cfg, &account_key_path, &alg, jwk).await?;
-    info!("Step 3.3 POST account. {}", nonce);
+    info!("Step 3.3 GET account. {}", kid);
 
     // 4 下单 -> 验证每个域名 -> 验证每个域名
     // 4.1 下单 /acme/new-order
     let (nonce, order_res) = _new_order(&dir.new_order, nonce, &account_key_path, &alg, &kid, &cfg.dns).await?;
-    info!("Step 4.1 POST order. {}", nonce);
+    info!("Step 4.1 GET order. {}", nonce);
 
     // 4.2 验证每个域名
     info!("Step 4.2 Authorization each domain. {:?}", &cfg.dns);
@@ -156,7 +160,11 @@ async fn acme_run(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError> {
         mut_nonce = nonce;
 
         let (domain, challenges) = (auth_order_res.identifier.unwrap().value, auth_order_res.challenges.unwrap());
-        let chall = challenges.into_iter().filter(|c| c._type == TYPE_HTTP).next().unwrap();
+        let chall = challenges.into_iter().filter(|c| c._type == TYPE_HTTP).next();
+        let chall = match chall {
+            Some(chall) => chall,
+            None => return AcmeError::tip(TIP_TYPE_HTTP_FAILED),
+        };
 
         let well_known_path = _write_to_challenges(chall.token, &domain, &cfg.acme_root, &thumbprint).await?;
         //轮询
@@ -184,10 +192,11 @@ async fn acme_run(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError> {
 
     info!("Step 4.3 Finalize domain with csr.");
     let fin_url = &order_res.finalize.unwrap();
-    let mut cert_url: Option<String> = None;
+
     let (nonce, os_url, or) = _finalize_csr(fin_url, mut_nonce, &account_key_path, &alg, &kid, csr.clone()).await?;
     mut_nonce = nonce;
 
+    let cert_url: Option<String>;
     if or.is_ok() {
         cert_url = or.certificate;
     } else {
@@ -205,17 +214,18 @@ async fn acme_run(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError> {
             if attempts == MAX_TRY {
                 return AcmeError::tip(TIP_MAX_TRY);
             }
-            let _ = std::thread::sleep(SLEEP_DURATION_SEC_15);
+            let _ = std::thread::sleep(SLEEP_DURATION_SEC_5);
             debug!("Loop {}/{}, order status", attempts, MAX_TRY);
         }
     }
 
     // 4.4 down certificate
-    if let None = cert_url {
-        return AcmeError::tip(TIP_DOWN_CRT_FAILED);
-    }
+    let cert_url = match cert_url {
+        Some(url) => url,
+        None => return AcmeError::tip(TIP_DOWN_CRT_FAILED),
+    };
     info!("Step 4.4 Download certificate file. Named {}", DOMAIN_CRT);
-    let sign_crt = _down_certificate(&cert_url.unwrap(), mut_nonce, &account_key_path, &alg, &kid).await?;
+    let sign_crt = _down_certificate(&cert_url, mut_nonce, &account_key_path, &alg, &kid).await?;
 
     info!("Step 4.5 Download ca intermediate file. Named intermediate.pem");
     let _intermediate_crt_url = cfg.ca.intermediate_crt_url(acccount_alg.is_ecc());
@@ -243,6 +253,17 @@ async fn acme_run(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError> {
     let _ = fs::copy(&sign_crt_path, format!("{}/{}.{}", bk_dir, bk_no, DOMAIN_CRT))?;
     let _ = fs::copy(&chained_pem_path, format!("{}/{}.{}", bk_dir, bk_no, CHAINED_CRT))?;
     let _ = fs::copy(&domain_key_path, format!("{}/{}.{}", bk_dir, bk_no, DOMAIN_KEY))?;
+
+    //5.3 若需要，复制到指定的证书目录下，文件名不变
+    if let Some(ssl_dir) = cfg.ssl_dir {
+        info!("Step 5.3 Copy to: {}", &ssl_dir);
+        if !Path::new(&ssl_dir).exists() {
+            return AcmeError::tip(&format!("The directory does not exist: {}", &ssl_dir));
+        }
+        let _ = fs::copy(&sign_crt_path, format!("{}/{}", ssl_dir, DOMAIN_CRT))?;
+        let _ = fs::copy(&chained_pem_path, format!("{}/{}", ssl_dir, CHAINED_CRT))?;
+        let _ = fs::copy(&domain_key_path, format!("{}/{}", ssl_dir, DOMAIN_KEY))?;
+    }
 
     let result = (sign_crt_path, chained_pem_path, domain_key_path);
 
@@ -396,6 +417,7 @@ struct AcmeCfg {
     domain_alg: Alg,
     log_level: LevelFilter,
     eab: Eab,
+    ssl_dir: Option<String>, //domin.key,chained.pem等文件复制到指定的证书目录下
 }
 
 impl AcmeCfg {
@@ -409,18 +431,19 @@ impl AcmeCfg {
             }
         }
 
-        let dns = map
-            .get("dns")
-            .ok_or_else(|| AcmeError::Tip("Missing parameter 'dns'".to_string()))?
-            .split(",")
-            .map(|s| s.to_string())
-            .collect();
+        let dns = map.get("dns").ok_or_else(|| AcmeError::Tip(TIP_MISSING_DNS.to_string()))?;
+
+        if dns.contains("*") {
+            return AcmeError::tip(TIP_INVALID_DNS);
+        }
+        let dns = dns.split(",").map(|s| s.to_string()).collect();
+
         let acme_root = map
             .get("dir")
-            .ok_or_else(|| AcmeError::Tip("Missing parameter 'dir'".to_string()))?
+            .ok_or_else(|| AcmeError::Tip(TIP_MISSING_DIR.to_string()))?
             .to_string();
 
-        if !std::path::Path::new(&acme_root).is_dir() {
+        if !Path::new(&acme_root).is_dir() {
             return AcmeError::tip(&format!("The directory does not exist: {}", acme_root));
         }
 
@@ -448,6 +471,7 @@ impl AcmeCfg {
         let eab_kid = map.get("eab_kid").map(|s| s.to_string());
         let eab_hmac_key = map.get("eab_key").map(|s| s.to_string());
         let eab = Eab::new(eab_kid, eab_hmac_key);
+        let ssl_dir = map.get("ssl_dir").map(|s| s.to_string());
 
         Ok(AcmeCfg {
             dns,
@@ -459,6 +483,7 @@ impl AcmeCfg {
             domain_alg,
             log_level,
             eab,
+            ssl_dir,
         })
     }
 }
@@ -523,13 +548,11 @@ enum Alg {
     RSA4096,
     ECC256,
     ECC384,
-    ECC521,
 }
 impl Alg {
     fn new(alg: &str) -> Self {
         match alg.to_uppercase().as_str() {
             DOMAIN_ALG_DEFAULT_EC3 | "ECC3" => Alg::ECC384,
-            "EC5" | "ECC5" => Alg::ECC521,
             "EC2" | "ECC2" => Alg::ECC256,
             "RSA4" => Alg::RSA4096,
             "RSA2" => Alg::RSA2048,
@@ -538,7 +561,7 @@ impl Alg {
     }
 
     fn is_ecc(&self) -> bool {
-        matches!(self, Alg::ECC256 | Alg::ECC384 | Alg::ECC521)
+        matches!(self, Alg::ECC256 | Alg::ECC384)
     }
 }
 #[derive(Deserialize, Debug)]
@@ -553,9 +576,9 @@ struct Directory {
 #[derive(Deserialize, Debug)]
 #[serde(rename_all(deserialize = "camelCase"))]
 struct DirectoryMeta {
-    terms_of_service: String,
-    website: String,
-    caa_identities: Vec<String>,
+    //terms_of_service: String,
+    //website: String,
+    //caa_identities: Vec<String>,
     external_account_required: Option<bool>,
 }
 
@@ -944,13 +967,15 @@ async fn _eab_by_email(url: &str, email: &str, acme_ca_dir: &str) -> Result<Opti
     } else {
         let url = format!("{}?email={}", url, email);
         let res = _http_json(&url, None, Method::POST).await?.1;
-        debug!("{}", &res);
         let _ = _write_to_file(&_cache_path, &res)?;
         res
     };
 
     let eab: Eab = serde_json::from_str(&res)?;
     if !eab.success {
+        if let Some(_e) = eab.error {
+            warn!("{}: {:?} {:?}", _e.code, _e._type, _e.info)
+        }
         return AcmeError::tip(TIP_EAB_FAILED);
     }
     Ok(Some(eab))
@@ -1140,7 +1165,6 @@ fn _gen_key_by_cmd_openssl(key_path: &str, alg: &Alg) -> Output {
         Alg::RSA4096 => vec!["genrsa", "-out", key_path, "4096"],
         Alg::ECC256 => vec!["ecparam", "-name", "prime256v1", "-genkey", "-out", key_path],
         Alg::ECC384 => vec!["ecparam", "-name", "secp384r1", "-genkey", "-out", key_path],
-        Alg::ECC521 => vec!["ecparam", "-name", "secp521r1", "-genkey", "-out", key_path],
     };
 
     let out = Command::new("openssl").args(a).output().unwrap();
@@ -1288,6 +1312,9 @@ fn _read_cache(_cache_path: &str) -> Option<String> {
 
 fn _cache_expire_then_rm(file_path: &str) -> Result<(), AcmeError> {
     let path = Path::new(file_path);
+    if !path.exists() {
+        return Ok(());
+    }
     let modified_time = fs::metadata(path)?.modified()?.duration_since(UNIX_EPOCH)?.as_secs();
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     if modified_time + CACHE_EXPIRE_SEC < now {
