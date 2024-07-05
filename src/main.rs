@@ -111,7 +111,7 @@ async fn acme_run(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError> {
 
     // 1.1 是否需要扩展账户信息eab，目前就是zerossl,gts
     if external_account_required & cfg.email.is_none() {
-        return Err(AcmeError::Tip(TIP_REQUIRED_EMAIL.to_string()));
+        return AcmeError::tip(TIP_REQUIRED_EMAIL);
     }
 
     // 3.1 先获取或生成 account.key, 通过参数指定(参考enum Alg)， 目前支持 rsa2048,rsa4096,prime256v1,prime384v1,prime512v1
@@ -171,7 +171,7 @@ async fn acme_run(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError> {
             attempts += 1;
 
             if attempts == MAX_TRY {
-                return Err(AcmeError::Tip(TIP_MAX_TRY.to_string()));
+                return AcmeError::tip(TIP_MAX_TRY);
             }
             let _ = std::thread::sleep(SLEEP_DURATION_SEC_2);
             debug!("Loop {}/{}, challenges domain", attempts, MAX_TRY);
@@ -203,7 +203,7 @@ async fn acme_run(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError> {
             attempts += 1;
 
             if attempts == MAX_TRY {
-                return Err(AcmeError::Tip(TIP_MAX_TRY.to_string()));
+                return AcmeError::tip(TIP_MAX_TRY);
             }
             let _ = std::thread::sleep(SLEEP_DURATION_SEC_15);
             debug!("Loop {}/{}, order status", attempts, MAX_TRY);
@@ -212,7 +212,7 @@ async fn acme_run(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError> {
 
     // 4.4 down certificate
     if let None = cert_url {
-        return Err(AcmeError::Tip(TIP_DOWN_CRT_FAILED.to_string()));
+        return AcmeError::tip(TIP_DOWN_CRT_FAILED);
     }
     info!("Step 4.4 Download certificate file. Named {}", DOMAIN_CRT);
     let sign_crt = _down_certificate(&cert_url.unwrap(), mut_nonce, &account_key_path, &alg, &kid).await?;
@@ -421,7 +421,7 @@ impl AcmeCfg {
             .to_string();
 
         if !std::path::Path::new(&acme_root).is_dir() {
-            return Err(AcmeError::Tip(format!("The directory does not exist: {}", acme_root)));
+            return AcmeError::tip(&format!("The directory does not exist: {}", acme_root));
         }
 
         let email = map.get("email").map(|s| s.to_string());
@@ -503,6 +503,10 @@ impl AcmeError {
             AcmeError::SerdeJsonError(_e) => _e.to_string(),
             AcmeError::Tip(_e) => _e.to_string(),
         }
+    }
+
+    fn tip<T>(s: &str) -> Result<T, AcmeError> {
+        Err(AcmeError::Tip(s.to_string()))
     }
 }
 
@@ -898,7 +902,7 @@ async fn _http_json(
 
     if !response.status().is_success() {
         warn!("{}", response.text().await?);
-        Err(AcmeError::Tip(format!("{}Error", c)))
+        AcmeError::tip(&format!("{}Error", c))
     } else {
         let res = response.text().await?;
         debug!("<== Response: {}", res);
@@ -947,7 +951,7 @@ async fn _eab_by_email(url: &str, email: &str, acme_ca_dir: &str) -> Result<Opti
 
     let eab: Eab = serde_json::from_str(&res)?;
     if !eab.success {
-        return Err(AcmeError::Tip(TIP_EAB_FAILED.to_string()));
+        return AcmeError::tip(TIP_EAB_FAILED);
     }
     Ok(Some(eab))
 }
@@ -1047,7 +1051,7 @@ async fn _write_to_challenges(token: String, domain: &str, acme_dir: &str, thumb
     let wellknown_url = format!("http://{0}/.well-known/acme-challenge/{1}", domain, token);
     let ka = _http_json(&wellknown_url, None, Method::GET).await?.1; // 自己先验一下
     if ka != key_authorization {
-        return Err(AcmeError::Tip(format!("Check failed: {}", wellknown_url)));
+        return AcmeError::tip(&format!("Check failed: {}", wellknown_url));
     }
     Ok(well_known_path)
 }
