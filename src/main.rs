@@ -185,10 +185,7 @@ async fn _acme_run(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError> 
     let _url = &_order_res.finalize.unwrap();
     let (_csr, domain_key_path_) = _gen_csr_by_cmd_openssl(&cfg.acme_dir, &cfg.domain_alg, &dns_)?;
 
-    info!(
-        "Step 4.3 Finalize domain with csr. Gen domain key by {:?}: {}",
-        &cfg.domain_alg, &domain_key_path_
-    );
+    info!("Step 4.3 Finalize domain with csr. Gen domain key by {:?}: {}", &cfg.domain_alg, &domain_key_path_);
 
     //轮询
     let mut attempts: u8 = 0;
@@ -226,10 +223,7 @@ async fn _acme_run(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError> 
     // 5.1、最后，合并sign.crt和intermediate.pem的内容成 chained.pem
     let sign_crt_path_ = format!("{}/{}", cfg.acme_dir, PATH_DOMAIN_CRT);
     let chained_pem_path_ = format!("{}/{}", cfg.acme_dir, PATH_CHAINED_CRT);
-    info!(
-        "Step 5.1 Combine {} and intermediate.pem: {}",
-        PATH_DOMAIN_CRT, &chained_pem_path_
-    );
+    info!("Step 5.1 Combine {} and intermediate.pem: {}", PATH_DOMAIN_CRT, &chained_pem_path_);
 
     let _ = _write_to_file(&sign_crt_path_, &_sign_crt)?;
     let _ = _write_to_file(&chained_pem_path_, &format!("{0}\n{1}", _sign_crt, _intermediate_pem))?;
@@ -407,13 +401,7 @@ impl Log for AcmeLogger {
             if f == "connect.rs" {
                 return;
             }
-            let msg = format!(
-                "{:5} [{}:{}] - {}",
-                record.level(),
-                f,
-                record.line().unwrap_or(0),
-                record.args()
-            );
+            let msg = format!("{:5} [{}:{}] - {}", record.level(), f, record.line().unwrap_or(0), record.args());
             println!("{}", msg);
         }
     }
@@ -1016,10 +1004,7 @@ async fn _new_acct(
         return Err(AcmeError::Tip(TIP_ACCOUNT_FAILED.to_string()));
     };
 
-    let (nonce, kid) = (
-        _get_header(REPLAY_NONCE, res.headers()),
-        _get_header("location", res.headers()),
-    );
+    let (nonce, kid) = (_get_header(REPLAY_NONCE, res.headers()), _get_header("location", res.headers()));
 
     let _ = _write_to_file(&_cache_path, &kid)?;
 
@@ -1172,20 +1157,8 @@ fn _gen_csr_by_cmd_openssl(acme_dir: &str, domain_key_alg: &Alg, dns: &Vec<Strin
     let dns_san = dns.iter().map(|_d| format!("DNS:{}", _d)).collect::<Vec<String>>().join(",");
     let _ = _write_to_file(&tmp, &format!("{}\n[SAN]\nsubjectAltName={}", openssl_cnf, dns_san))?;
 
-    let a = [
-        "req",
-        "-new",
-        "-key",
-        &domain_key_path,
-        "-subj",
-        "/",
-        "-reqexts",
-        "SAN",
-        "-config",
-        &tmp,
-        "-out",
-        &domain_csr_path,
-    ];
+    let a =
+        ["req", "-new", "-key", &domain_key_path, "-subj", "/", "-reqexts", "SAN", "-config", &tmp, "-out", &domain_csr_path];
     let out = Command::new("openssl").args(a).output()?;
     trace!("{:?}", out);
 
@@ -1322,10 +1295,7 @@ fn _cache_expire_then_rm(file_path: &str) -> Result<(), AcmeError> {
     let modified_time = fs::metadata(path)?.modified()?.duration_since(UNIX_EPOCH)?.as_secs();
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     if modified_time + CACHE_EXPIRE_SEC < now {
-        debug!(
-            "Cache expired. File modified > {} days, then rm: {}",
-            CACHE_EXPIRE_DAY, &file_path
-        );
+        debug!("Cache expired. File modified > {} days, then rm: {}", CACHE_EXPIRE_DAY, &file_path);
         fs::remove_file(path)?;
     }
     Ok(())

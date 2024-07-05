@@ -1,4 +1,5 @@
 # rustfmt.toml
-max_width = 128
-#hard_tabs = true
+edition = "2021"
 tab_spaces = 4
+max_width = 128
+array_width = 128
