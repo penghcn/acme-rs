@@ -73,43 +73,42 @@ async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect(); // 获取所有的命令行参数，跳过第一个参数（程序路径）
     dbg!(&args);
 
-    let _cfg = AcmeCfg::new(args);
-    if let Err(_e) = _cfg {
+    let cfg = AcmeCfg::new(args);
+    if let Err(_e) = cfg {
         dbg!(_e);
         return; //中断
     }
-    let _cfg = _cfg.unwrap();
+    let cfg = cfg.unwrap();
 
     //set log
     log::set_boxed_logger(Box::new(AcmeLogger)).unwrap();
-    log::set_max_level(_cfg.log_level);
+    log::set_max_level(cfg.log_level);
 
     // ssl_certificate .../le_ssl_chained.pem;
     // ssl_certificate_key .../le_ssl_domain.key;
-    match _acme_run(_cfg).await {
+    match acme_run(cfg).await {
         Err(_e) => warn!("{:?}", _e),
-        Ok((sign_crt_path_, chained_pem_path_, domain_key_path_)) => {
+        Ok((sign_crt_path, chained_pem_path, domain_key_path)) => {
             info!(
                 "Successfully.\nFor Nginx configuration:\nssl_certificate {0}\nssl_certificate_key {1}",
-                chained_pem_path_, domain_key_path_
+                chained_pem_path, domain_key_path
             );
             info!(
                 "\nFor Apache configuration:\nSSLEngine on\nSSLCertificateFile {0}\nSSLCertificateKeyFile {1}\nSSLCertificateChainFile {2}",
-                sign_crt_path_, chained_pem_path_, domain_key_path_
+                sign_crt_path, chained_pem_path, domain_key_path
             );
         }
     }
 }
 
-async fn _acme_run(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError> {
+async fn acme_run(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError> {
     // 0 初始化参数，获取或者默认值
     info!("Step 1 Init Params: {:?}", cfg);
-    let dns_ = &cfg.dns;
 
     // 1 init获取接口  /directory
-    let _dir = _directory(cfg.ca.directory_url()).await?;
-    info!("Step 2 GET Directory. {:?}", _dir);
-    let external_account_required = _dir.meta.external_account_required.unwrap_or(false);
+    let dir = _directory(cfg.ca.directory_url()).await?;
+    info!("Step 2 GET Directory. {:?}", dir);
+    let external_account_required = dir.meta.external_account_required.unwrap_or(false);
 
     // 1.1 是否需要扩展账户信息，目前就是zerossl
     if external_account_required & cfg.email.is_none() {
@@ -117,24 +116,24 @@ async fn _acme_run(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError> 
     }
 
     // 2 获取nonce接口  /acme/new-nonce
-    let _nonce = _new_nonce(&_dir.new_nonce).await?;
+    let nonce = _new_nonce(&dir.new_nonce).await?;
 
     // 3
     // 3.1 先获取或生成 account.key, 通过参数指定(参考enum Alg)， 目前支持 rsa2048,rsa4096,prime256v1,prime384v1,prime512v1
-    let account_key_path_ = format!("{0}{1}", cfg.acme_ca_dir, PATH_ACCOUNT_KEY);
-    let acccount_alg_ = Alg::new(ACCOUNT_ALG_DEFAULT_EC2); //cfg.alg;
+    let account_key_path = format!("{0}{1}", cfg.acme_ca_dir, PATH_ACCOUNT_KEY);
+    let acccount_alg = Alg::new(ACCOUNT_ALG_DEFAULT_EC2); //cfg.alg;
 
-    if _read_cache(&account_key_path_).is_none() {
-        let _ = _gen_key_by_cmd_openssl(&account_key_path_, &acccount_alg_);
-        let _kid_cache_path = format!("{0}{1}", cfg.acme_ca_dir, PATH_CACHE_KID);
-        let _kid_cache_path = Path::new(&_kid_cache_path);
-        if _kid_cache_path.exists() {
-            fs::remove_file(_kid_cache_path)?; //同时删除cache_kid
+    if _read_cache(&account_key_path).is_none() {
+        let _ = _gen_key_by_cmd_openssl(&account_key_path, &acccount_alg);
+        let kid_cache_path = format!("{0}{1}", cfg.acme_ca_dir, PATH_CACHE_KID);
+        let kid_cache_path = Path::new(&kid_cache_path);
+        if kid_cache_path.exists() {
+            fs::remove_file(kid_cache_path)?; //同时删除cache_kid
         }
-        info!("Step 3.1 Gen account key: {}", &account_key_path_);
+        info!("Step 3.1 Gen account key: {}", &account_key_path);
     }
 
-    let jwk = _print_key_by_cmd_openssl(&account_key_path_, acccount_alg_.is_ecc());
+    let jwk = _print_key_by_cmd_openssl(&account_key_path, acccount_alg.is_ecc());
     let alg = jwk.alg();
     let thumbprint = _base64_sha256(&jwk.to_string());
     debug!("\njwk: {:?}, thumbprint:{}", jwk, thumbprint);
@@ -142,32 +141,32 @@ async fn _acme_run(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError> 
     // 3.2 注册账号接口 /acme/new-acct
     //let email = if external_account_required { cfg.email } else { None };
     //let email = cfg.email.filter(|_| external_account_required);
-    let (_nonce, kid) = _new_acct(_dir.new_account, _nonce, &cfg, &account_key_path_, &alg, jwk).await?;
-    info!("Step 3.2 POST account. {}", _nonce);
+    let (nonce, kid) = _new_acct(dir.new_account, nonce, &cfg, &account_key_path, &alg, jwk).await?;
+    info!("Step 3.2 POST account. {}", nonce);
 
     // 4 下单 -> 验证每个域名 -> 验证每个域名
     // 4.1 下单 /acme/new-order
-    let (_nonce, _location, _order_res) = _new_order(&_dir.new_order, _nonce, &account_key_path_, &alg, &kid, &dns_).await?;
-    info!("Step 4.1 POST order. {}", _nonce);
+    let (nonce, location, order_res) = _new_order(&dir.new_order, nonce, &account_key_path, &alg, &kid, &cfg.dns).await?;
+    info!("Step 4.1 POST order. {}", nonce);
 
     // 4.2 验证每个域名
-    info!("Step 4.2 Authorization each domain. {:?}", &dns_);
-    let mut _mut_nonce_ = _nonce;
-    for _authz_url in _order_res.authorizations.unwrap() {
-        let (_nonce, _order_res) = _auth_domain(_authz_url, _mut_nonce_, &account_key_path_, &alg, &kid).await?;
-        _mut_nonce_ = _nonce;
+    info!("Step 4.2 Authorization each domain. {:?}", &cfg.dns);
+    let mut mut_nonce = nonce;
+    for _authz_url in order_res.authorizations.unwrap() {
+        let (nonce, auth_order_res) = _auth_domain(_authz_url, mut_nonce, &account_key_path, &alg, &kid).await?;
+        mut_nonce = nonce;
 
-        let (_domain, _challenges) = (_order_res.identifier.unwrap().value, _order_res.challenges.unwrap());
-        let _chall = _challenges.into_iter().filter(|c| c._type == TYPE_HTTP).next().unwrap();
+        let (domain, challenges) = (auth_order_res.identifier.unwrap().value, auth_order_res.challenges.unwrap());
+        let chall = challenges.into_iter().filter(|c| c._type == TYPE_HTTP).next().unwrap();
 
-        let _well_known_path = _write_to_challenges(_chall.token, &_domain, &cfg.acme_root, &thumbprint).await?;
+        let well_known_path = _write_to_challenges(chall.token, &domain, &cfg.acme_root, &thumbprint).await?;
         //轮询
         let mut attempts: u8 = 0;
         loop {
-            let (_nonce, _ok) = _chall_domain(&_chall.url, _mut_nonce_, &account_key_path_, &alg, &kid).await?;
-            _mut_nonce_ = _nonce;
+            let (_nonce, _ok) = _chall_domain(&chall.url, mut_nonce, &account_key_path, &alg, &kid).await?;
+            mut_nonce = _nonce;
             if _ok {
-                println!("Successful.{}", &_chall.url);
+                println!("Successful.{}", &chall.url);
                 break;
             }
             attempts += 1;
@@ -178,25 +177,28 @@ async fn _acme_run(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError> 
             }
             let _ = std::thread::sleep(SLEEP_DURATION_SEC_2);
         }
-        let _ = fs::remove_file(&_well_known_path).map_err(|_| AcmeError::Tip(format!("Remove failed: {}", _well_known_path)));
+        let _ = fs::remove_file(&well_known_path).map_err(|_| AcmeError::Tip(format!("Remove failed: {}", well_known_path)));
     }
 
     // 4.3 finalize csr
-    let _url = &_order_res.finalize.unwrap();
-    let (_csr, domain_key_path_) = _gen_csr_by_cmd_openssl(&cfg.acme_dir, &cfg.domain_alg, &dns_)?;
+    let fin_url = &order_res.finalize.unwrap();
+    let (csr, domain_key_path) = _gen_csr_by_cmd_openssl(&cfg.acme_dir, &cfg.domain_alg, &cfg.dns)?;
 
-    info!("Step 4.3 Finalize domain with csr. Gen domain key by {:?}: {}", &cfg.domain_alg, &domain_key_path_);
+    info!(
+        "Step 4.3 Finalize domain with csr. Gen domain key by {:?}: {}",
+        &cfg.domain_alg, &domain_key_path
+    );
 
     //轮询
     let mut attempts: u8 = 0;
-    let mut _cert_url: Option<String> = None;
+    let mut cert_url: Option<String> = None;
     loop {
-        let (_nonce, _or) = _finalize_csr(_url, _mut_nonce_, &account_key_path_, &alg, &kid, _csr.clone()).await?;
-        _mut_nonce_ = _nonce;
-        if let Some(_or) = _or {
+        let (nonce, or) = _finalize_csr(fin_url, mut_nonce, &account_key_path, &alg, &kid, csr.clone()).await?;
+        mut_nonce = nonce;
+        if let Some(_or) = or {
             if _or.status == STATUS_OK {
                 //println!("Successful.{:?}", &_or.certificate);
-                _cert_url = _or.certificate;
+                cert_url = _or.certificate;
                 break;
             }
         }
@@ -210,23 +212,26 @@ async fn _acme_run(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError> 
     }
 
     // 4.4 down certificate
-    if let None = _cert_url {
+    if let None = cert_url {
         return Err(AcmeError::Tip(TIP_DOWN_CRT_FAILED.to_string()));
     }
     info!("Step 4.4 Download certificate file. Named {}", PATH_DOMAIN_CRT);
-    let _sign_crt = _down_certificate(&_cert_url.unwrap(), _mut_nonce_, &account_key_path_, &alg, &kid).await?;
+    let sign_crt = _down_certificate(&cert_url.unwrap(), mut_nonce, &account_key_path, &alg, &kid).await?;
 
     info!("Step 4.5 Download ca intermediate file. Named intermediate.pem");
-    let _intermediate_crt_url = cfg.ca.intermediate_crt_url(acccount_alg_.is_ecc());
+    let _intermediate_crt_url = cfg.ca.intermediate_crt_url(acccount_alg.is_ecc());
     let _intermediate_pem = _http_json(&_intermediate_crt_url, None, Method::GET).await?.text().await?;
 
     // 5.1、最后，合并sign.crt和intermediate.pem的内容成 chained.pem
-    let sign_crt_path_ = format!("{}/{}", cfg.acme_dir, PATH_DOMAIN_CRT);
-    let chained_pem_path_ = format!("{}/{}", cfg.acme_dir, PATH_CHAINED_CRT);
-    info!("Step 5.1 Combine {} and intermediate.pem: {}", PATH_DOMAIN_CRT, &chained_pem_path_);
+    let sign_crt_path = format!("{}/{}", cfg.acme_dir, PATH_DOMAIN_CRT);
+    let chained_pem_path = format!("{}/{}", cfg.acme_dir, PATH_CHAINED_CRT);
+    info!(
+        "Step 5.1 Combine {} and intermediate.pem: {}",
+        PATH_DOMAIN_CRT, &chained_pem_path
+    );
 
-    let _ = _write_to_file(&sign_crt_path_, &_sign_crt)?;
-    let _ = _write_to_file(&chained_pem_path_, &format!("{0}\n{1}", _sign_crt, _intermediate_pem))?;
+    let _ = _write_to_file(&sign_crt_path, &sign_crt)?;
+    let _ = _write_to_file(&chained_pem_path, &format!("{0}\n{1}", sign_crt, _intermediate_pem))?;
 
     // 5.2、复制小文件到备份目录
     let _bk_no = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
@@ -238,11 +243,11 @@ async fn _acme_run(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError> 
     }
     info!("Step 5.2 Backup to : {}", &_bk_dir);
 
-    let _ = fs::copy(&sign_crt_path_, format!("{}/{}.{}", _bk_dir, _bk_no, PATH_DOMAIN_CRT))?;
-    let _ = fs::copy(&chained_pem_path_, format!("{}/{}.{}", _bk_dir, _bk_no, PATH_CHAINED_CRT))?;
-    let _ = fs::copy(&domain_key_path_, format!("{}/{}.{}", _bk_dir, _bk_no, PATH_DOMAIN_KEY))?;
+    let _ = fs::copy(&sign_crt_path, format!("{}/{}.{}", _bk_dir, _bk_no, PATH_DOMAIN_CRT))?;
+    let _ = fs::copy(&chained_pem_path, format!("{}/{}.{}", _bk_dir, _bk_no, PATH_CHAINED_CRT))?;
+    let _ = fs::copy(&domain_key_path, format!("{}/{}.{}", _bk_dir, _bk_no, PATH_DOMAIN_KEY))?;
 
-    let result = (sign_crt_path_, chained_pem_path_, domain_key_path_);
+    let result = (sign_crt_path, chained_pem_path, domain_key_path);
 
     Ok(result)
 }
@@ -401,7 +406,13 @@ impl Log for AcmeLogger {
             if f == "connect.rs" {
                 return;
             }
-            let msg = format!("{:5} [{}:{}] - {}", record.level(), f, record.line().unwrap_or(0), record.args());
+            let msg = format!(
+                "{:5} [{}:{}] - {}",
+                record.level(),
+                f,
+                record.line().unwrap_or(0),
+                record.args()
+            );
             println!("{}", msg);
         }
     }
@@ -1004,7 +1015,10 @@ async fn _new_acct(
         return Err(AcmeError::Tip(TIP_ACCOUNT_FAILED.to_string()));
     };
 
-    let (nonce, kid) = (_get_header(REPLAY_NONCE, res.headers()), _get_header("location", res.headers()));
+    let (nonce, kid) = (
+        _get_header(REPLAY_NONCE, res.headers()),
+        _get_header("location", res.headers()),
+    );
 
     let _ = _write_to_file(&_cache_path, &kid)?;
 
@@ -1295,7 +1309,10 @@ fn _cache_expire_then_rm(file_path: &str) -> Result<(), AcmeError> {
     let modified_time = fs::metadata(path)?.modified()?.duration_since(UNIX_EPOCH)?.as_secs();
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     if modified_time + CACHE_EXPIRE_SEC < now {
-        debug!("Cache expired. File modified > {} days, then rm: {}", CACHE_EXPIRE_DAY, &file_path);
+        debug!(
+            "Cache expired. File modified > {} days, then rm: {}",
+            CACHE_EXPIRE_DAY, &file_path
+        );
         fs::remove_file(path)?;
     }
     Ok(())
