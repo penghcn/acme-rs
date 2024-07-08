@@ -1,4 +1,5 @@
 use base64::{engine::general_purpose::URL_SAFE, Engine as _};
+use chrono::Local;
 use hmac::{Hmac, Mac};
 use log::{debug, info, trace, warn, Level, LevelFilter, Log, Record};
 use regex::Regex;
@@ -39,9 +40,18 @@ const DOMAIN_CRT: &str = "sign.crt";
 const CHAINED_CRT: &str = "chained.crt";
 
 const CA_DEFAULT_LE: &str = "le";
-const ACCOUNT_ALG_DEFAULT_EC2: &str = "EC2"; //acme接口签名等使用ecc256
-const DOMAIN_ALG_DEFAULT_EC3: &str = "EC3"; //dns默认使用ecc384算法
-const ALG_HMAC_256: &str = "HS256";
+const ACCOUNT_ALG_DEFAULT_EC2: &str = "EC2"; //acme接口签名等使用ecc256签名
+const DOMAIN_ALG_DEFAULT_EC3: &str = "EC3"; //域名默认使用ecc384算法，可通过alg参数自定义
+const ALG_HMAC_256: &str = "HS256"; //eab使用该算法签名
+
+const CACHE_EXPIRE_DAY: u64 = 7; //7天过期
+const CACHE_EXPIRE_SEC: u64 = 60 * 60 * 24 * CACHE_EXPIRE_DAY; //时间戳，7天过期
+const MAX_TRY: u8 = 8; //重试最大次数
+const SLEEP_DURATION_SEC_2: Duration = Duration::from_secs(2); //2s
+const SLEEP_DURATION_SEC_5: Duration = Duration::from_secs(5); //5s
+const LOG_LEVEL_DEAULT: LevelFilter = LevelFilter::Debug;
+
+const FMT_LOCAL_TIME: &str = "%m/%d %H:%M:%S%.3f"; // 07/08 09:53:37.520
 
 const CONTENT_TYPE_JSON: &str = "application/jose+json";
 const USER_AGENT: &str = "acme.rs";
@@ -61,30 +71,25 @@ const TIP_MAX_TRY: &str = "Maximum attempts reached, exiting.";
 const TIP_EAB_FAILED: &str = "Get Eab Fialed.";
 const TIP_TYPE_HTTP_FAILED: &str = "Get challenges http-01 Fialed.";
 
-const CACHE_EXPIRE_DAY: u64 = 7; //7天过期
-const CACHE_EXPIRE_SEC: u64 = 60 * 60 * 24 * CACHE_EXPIRE_DAY; //时间戳，7天过期
-const MAX_TRY: u8 = 8; //
-const SLEEP_DURATION_SEC_2: Duration = Duration::from_secs(2); //2s
-const SLEEP_DURATION_SEC_5: Duration = Duration::from_secs(5); //5s
-const LOG_LEVEL_DEAULT: LevelFilter = LevelFilter::Debug;
-
 // acme规范参考 https://datatracker.ietf.org/doc/html/rfc8555#section-7.2
 #[tokio::main]
 async fn main() {
+    //set log
+    log::set_boxed_logger(Box::new(AcmeLogger)).unwrap();
+    log::set_max_level(LevelFilter::Info);
     // cargo test --test acme -- _acme --exact --show-output  dns=ai8.rs,www.ai8.rs dir=/www/ai8.rs email=a@a.org ca=z
-    // cargo run --  dns=ai8.rs,www.ai8.rs dir=/www/ai8.rs ca=z email=a@a.rs alg=ec5
+    // cargo run --  dns=ai8.rs,www.ai8.rs dir=/www/ai8.rs ca=z email=a@a.rs alg=rsa4
     let args: Vec<String> = std::env::args().skip(1).collect(); // 获取所有的命令行参数，跳过第一个参数（程序路径）
-    dbg!(&args);
+    info!("Get args: {:?}", &args);
 
     let cfg = AcmeCfg::new(args);
     if let Err(_e) = cfg {
-        dbg!(_e);
+        info!("{:?}", _e);
         return; //中断
     }
     let cfg = cfg.unwrap();
 
     //set log
-    log::set_boxed_logger(Box::new(AcmeLogger)).unwrap();
     log::set_max_level(cfg.log_level);
 
     // ssl_certificate .../le_ssl_chained.pem;
@@ -132,7 +137,7 @@ async fn acme_run(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError> {
         info!("Step 3.1 Gen account key by {:?}: {}", &acccount_alg, &account_key_path);
     }
 
-    let jwk = _print_key_by_cmd_openssl(&account_key_path, acccount_alg.is_ecc());
+    let jwk = _print_key_by_cmd_openssl(&account_key_path, acccount_alg.is_ecc())?;
     let alg = jwk.alg();
     let thumbprint = _base64_sha256(&jwk.to_string());
     debug!("\njwk: {:?}, thumbprint:{}", jwk, thumbprint);
@@ -392,8 +397,10 @@ impl Log for AcmeLogger {
             if f == "connect.rs" {
                 return;
             }
+            let now_local = Local::now().format(FMT_LOCAL_TIME);
             let msg = format!(
-                "{:5} [{}:{}] - {}",
+                "{} {:5} [{}:{}] - {}",
+                now_local,
                 record.level(),
                 f,
                 record.line().unwrap_or(0),
@@ -655,7 +662,7 @@ enum Jwk {
     _Rsa(JwkRsa),
 }
 impl Jwk {
-    fn call(out: &str, is_ecc: bool) -> Self {
+    fn call(out: &str, is_ecc: bool) -> Result<Self, AcmeError> {
         //let is_ecc= out.starts_with("Private-Key:");
         if is_ecc {
             let pub_ = _regx(&out, r"pub:\n\s+([0-9a-fA-F:]+(?:\n\s+[0-9a-fA-F:]+)*)", true);
@@ -663,7 +670,7 @@ impl Jwk {
 
             let offset = pub_.len() / 2 + 1;
             let (x, y) = (_base64_hex(&pub_[2..offset]), _base64_hex(&pub_[offset..]));
-            Self::_Ecc(JwkEcc::new(crv, x, y))
+            Ok(Self::_Ecc(JwkEcc::new(crv, x, y)))
         } else {
             let pub_ = _regx(&out, r"modulus:[\s]+?00:([a-f0-9\:\s]+?)\npublicExponent: ([0-9]+)", true);
             let e = _regx(&out, r"0x([A-Fa-f0-9]+)", false);
@@ -672,7 +679,7 @@ impl Jwk {
 
             let (e64, n) = (_base64_hex(&e), _base64_hex(&pub_));
 
-            Self::_Rsa(JwkRsa::new(e64, n))
+            Ok(Self::_Rsa(JwkRsa::new(e64, n)))
         }
     }
 
@@ -816,11 +823,11 @@ struct SigBody {
     signature: String,
 }
 impl SigBody {
-    pub fn from(payload: Option<Payload>, protected: Protected, file_path: &str) -> Self {
-        Self::new(Self::payload64(payload), protected, file_path)
+    pub fn from(payload: Option<Payload>, protected: Protected, file_path: &str) -> Result<Self, AcmeError> {
+        Self::new(Self::payload64(payload)?, protected, file_path)
     }
 
-    pub fn new(payload64: String, protected: Protected, file_path: &str) -> Self {
+    pub fn new(payload64: String, protected: Protected, file_path: &str) -> Result<Self, AcmeError> {
         let protected_json = serde_json::to_string(&protected).unwrap();
         let protected64 = _base64(protected_json.as_bytes());
         trace!("protected:{}\nprotected64:{}", protected_json, protected64);
@@ -830,28 +837,28 @@ impl SigBody {
         let signature = if protected.alg.starts_with("H") {
             _base64_hmac256(file_path, &plain)
         } else {
-            _sign_by_cmd_openssl(file_path, &plain, protected.alg.starts_with("E"), &protected.alg[2..])
+            _sign_by_cmd_openssl(file_path, &plain, protected.alg.starts_with("E"), &protected.alg[2..])?
         };
-        SigBody {
+        Ok(SigBody {
             payload: payload64,
             protected: protected64,
             signature: signature,
-        }
+        })
     }
 
-    pub fn to_string(&self) -> Option<String> {
-        Some(serde_json::to_string(&self).unwrap())
+    pub fn to_string(&self) -> Result<Option<String>, AcmeError> {
+        Ok(Some(serde_json::to_string(&self)?))
     }
-    pub fn payload64(payload: Option<Payload>) -> String {
+    fn payload64(payload: Option<Payload>) -> Result<String, AcmeError> {
         match payload {
             Some(p) => {
-                let payload_json = serde_json::to_string(&p).unwrap();
+                let payload_json = serde_json::to_string(&p)?;
                 //.replace("\":", "\": ");
                 let payload64 = _base64(payload_json.as_bytes());
                 trace!("payload:{:?}, => \n{}\npayload64:{}", p, payload_json, payload64);
-                payload64
+                Ok(payload64)
             }
-            None => "".to_string(),
+            None => Ok("".to_string()),
         }
     }
 }
@@ -890,8 +897,8 @@ async fn _post_kid(
     payload: Option<Payload>,
 ) -> Result<(reqwest::header::HeaderMap, String), AcmeError> {
     let protected = Protected::from_kid(&url, nonce, alg, kid);
-    let sig_body = SigBody::from(payload, protected, file_path);
-    _http_json(&url, sig_body.to_string(), Method::POST).await
+    let sig_body = SigBody::from(payload, protected, file_path)?;
+    _http_json(&url, sig_body.to_string()?, Method::POST).await
 }
 async fn _http_json(
     url: &str,
@@ -1013,7 +1020,7 @@ async fn _new_acct(
                 eab_payload64,
                 Protected::from_eab(&url, ALG_HMAC_256, &eab.eab_kid.unwrap()),
                 &eab.eab_hmac_key.unwrap(),
-            ))
+            )?)
         } else {
             None
         };
@@ -1026,9 +1033,9 @@ async fn _new_acct(
     };
 
     let protected = Protected::from(&url, nonce, alg, jwk);
-    let sig_body = SigBody::from(payload, protected, ak_path);
+    let sig_body = SigBody::from(payload, protected, ak_path)?;
 
-    let headers = _http_json(&url, sig_body.to_string(), Method::POST).await?.0;
+    let headers = _http_json(&url, sig_body.to_string()?, Method::POST).await?.0;
 
     let (nonce, kid) = (
         _get_header(HEADER_REPLAY_NONCE, &headers),
@@ -1159,7 +1166,7 @@ fn _base64_sha256(p: &str) -> String {
     b64_hash
 }
 
-fn _gen_key_by_cmd_openssl(key_path: &str, alg: &Alg) -> Output {
+fn _gen_key_by_cmd_openssl(key_path: &str, alg: &Alg) -> Result<Output, AcmeError> {
     let a: Vec<&str> = match alg {
         Alg::RSA2048 => vec!["genrsa", "-out", key_path, "2048"],
         Alg::RSA4096 => vec!["genrsa", "-out", key_path, "4096"],
@@ -1167,8 +1174,8 @@ fn _gen_key_by_cmd_openssl(key_path: &str, alg: &Alg) -> Output {
         Alg::ECC384 => vec!["ecparam", "-name", "secp384r1", "-genkey", "-out", key_path],
     };
 
-    let out = Command::new("openssl").args(a).output().unwrap();
-    out
+    let out = Command::new("openssl").args(a).output()?;
+    Ok(out)
 }
 
 // echo "[SAN]\nsubjectAltName=$DNS" > openssl.cnf.1.tmp
@@ -1209,30 +1216,28 @@ fn _write_to_file(file_path: &str, s: &str) -> Result<(), AcmeError> {
     Ok(())
 }
 
-fn _print_key_by_cmd_openssl(account_key_path: &str, is_ecc: bool) -> Jwk {
+fn _print_key_by_cmd_openssl(account_key_path: &str, is_ecc: bool) -> Result<Jwk, AcmeError> {
     let alg = if is_ecc { "ec" } else { "rsa" };
     let out = Command::new("openssl")
         .args([alg, "-in", account_key_path, "-noout", "-text"])
-        .output()
-        .unwrap();
+        .output()?;
     let out = String::from_utf8(out.stdout).unwrap();
     trace!("out: \n{}", &out);
 
     Jwk::call(&out, is_ecc)
 }
 
-fn _sign_by_cmd_openssl(account_key_path: &str, plain: &str, is_ecc: bool, alg_len: &str) -> String {
+fn _sign_by_cmd_openssl(account_key_path: &str, plain: &str, is_ecc: bool, alg_len: &str) -> Result<String, AcmeError> {
     let sha = format!("-sha{}", &alg_len);
     let mut child = Command::new("openssl")
         .args(&["dgst", &sha, "-sign", &account_key_path])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped()) // 捕获输出
-        .spawn()
-        .unwrap();
+        .spawn()?;
 
     {
         let stdin = child.stdin.as_mut().expect("Failed to open stdin");
-        stdin.write_all(&plain.as_bytes()).unwrap()
+        stdin.write_all(&plain.as_bytes())?
     }
 
     trace!(
@@ -1242,28 +1247,27 @@ fn _sign_by_cmd_openssl(account_key_path: &str, plain: &str, is_ecc: bool, alg_l
         if is_ecc { "| openssl asn1parse -inform DER" } else { "" }
     );
 
-    let out = child.wait_with_output().unwrap();
+    let out = child.wait_with_output()?;
     if is_ecc {
         let mut child = Command::new("openssl")
             .args(&["asn1parse", "-inform", "DER"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped()) // 捕获输出
-            .spawn()
-            .unwrap();
+            .spawn()?;
 
         {
             let stdin = child.stdin.as_mut().expect("Failed to open stdin");
-            stdin.write_all(&out.stdout).unwrap()
+            stdin.write_all(&out.stdout)?
         }
-        let out = child.wait_with_output().unwrap();
+        let out = child.wait_with_output()?;
         let out = String::from_utf8(out.stdout).unwrap();
         trace!("sign ecc out:\n{}", &out);
 
-        _base64_hex(&_asn1_parse(&out))
+        Ok(_base64_hex(&_asn1_parse(&out)))
     } else {
         let out = _base64(&out.stdout);
         trace!("sign rsa out: {}", &out);
-        out
+        Ok(out)
     }
 }
 
@@ -1325,5 +1329,4 @@ fn _cache_expire_then_rm(file_path: &str) -> Result<(), AcmeError> {
         fs::remove_file(path)?;
     }
     Ok(())
-    //Ok(modified_time + CACHE_EXPIRE_SEC < now)
 }
