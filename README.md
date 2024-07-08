@@ -9,7 +9,7 @@ cargo run --  dns=ai8.rs,www.ai8.rs dir=/www/ai8.rs
 
 2) To use another CA like ZeroSSL, like this:
 ```
-cargo run --  dns=ai8.rs,www.ai8.rs dir=/www/ai8.rs ca=z email=a@a.rs alg=ec5
+cargo run --  dns=ai8.rs,www.ai8.rs dir=/www/ai8.rs ca=z email=a@a.rs alg=rsa4
 ```
 
 3) For more parameter configurations, please refer to the following.
