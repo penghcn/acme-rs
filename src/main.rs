@@ -24,6 +24,8 @@ const URL_ZERO_INTERMEDIATE_RSA: &str = "https://crt.sh/?d=1282303295"; // https
 const URL_ZERO_INTERMEDIATE_ECC: &str = "https://crt.sh/?d=1282303296";
 
 const URL_GOOGLE_TRUST: &str = "https://dv.acme-v02.api.pki.goog/directory"; //注意大陆境内，该链接无法访问
+const URL_GTS_INTERMEDIATE_RSA: &str = "https://pki.goog/roots.pem"; // https://pki.goog/faq/#faq-27
+const URL_GTS_INTERMEDIATE_ECC: &str = "https://pki.goog/roots.pem"; // 使用的是rsa，无独立的ecc证书链
 
 const DIR_CA_LE: &str = "/letsencrypt/v02";
 const DIR_CA_ZERO: &str = "/zerossl/v2/DV90";
@@ -161,19 +163,42 @@ async fn acme_run(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError> {
     info!("Step 4.2 Authorization each domain. {:?}", &cfg.dns);
     let mut mut_nonce = nonce;
     for _authz_url in order_res.authorizations.unwrap() {
-        let (nonce, auth_order_res) = _auth_domain(_authz_url, mut_nonce, &account_key_path, &alg, &kid).await?;
+        let (nonce, auth_order_res) = _auth_domain(&_authz_url, mut_nonce, &account_key_path, &alg, &kid).await?;
         mut_nonce = nonce;
 
+        let is_ok = auth_order_res.is_ok();
         let (domain, challenges) = (auth_order_res.identifier.unwrap().value, auth_order_res.challenges.unwrap());
+        if is_ok {
+            info!("Verifyed {0}.", domain);
+            continue;
+        }
+
+        info!("Verifying {0}...", domain);
         let chall = challenges.into_iter().filter(|c| c._type == TYPE_HTTP).next();
         let chall = match chall {
             Some(chall) => chall,
             None => return AcmeError::tip(TIP_TYPE_HTTP_FAILED),
         };
 
+        let mut attempts: u8 = 0; //轮询auth
+        loop {
+            let (nonce, auth_order_res) = _auth_domain(&_authz_url, mut_nonce, &account_key_path, &alg, &kid).await?;
+            mut_nonce = nonce;
+            if auth_order_res.is_ok() || auth_order_res.status == "pending" {
+                break;
+            }
+            attempts += 1;
+
+            if attempts == MAX_TRY {
+                return AcmeError::tip(TIP_MAX_TRY);
+            }
+            let _ = std::thread::sleep(SLEEP_DURATION_SEC_2);
+            debug!("Loop {}/{}, auth domain", attempts, MAX_TRY);
+        }
+
         let well_known_path = _write_to_challenges(chall.token, &domain, &cfg.acme_root, &thumbprint).await?;
-        //轮询
-        let mut attempts: u8 = 0;
+
+        let mut attempts: u8 = 0; //轮询challenges
         loop {
             let (_nonce, _ok) = _chall_domain(&chall.url, mut_nonce, &account_key_path, &alg, &kid).await?;
             mut_nonce = _nonce;
@@ -233,8 +258,13 @@ async fn acme_run(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError> {
     let sign_crt = _down_certificate(&cert_url, mut_nonce, &account_key_path, &alg, &kid).await?;
 
     info!("Step 4.5 Download ca intermediate file. Named intermediate.pem");
-    let _intermediate_crt_url = cfg.ca.intermediate_crt_url(acccount_alg.is_ecc());
-    let _intermediate_pem = _http_json(&_intermediate_crt_url, None, Method::GET).await?.1;
+    let _intermediate_pem = match cfg.ca {
+        AcmeCa::LetsEncrypt(ca) | AcmeCa::ZeroSSL(ca) => {
+            let _intermediate_crt_url = ca.intermediate_crt_url(acccount_alg.is_ecc());
+            _http_json(&_intermediate_crt_url, None, Method::GET).await?.1
+        }
+        _ => "".to_string(),
+    };
 
     // 5.1、最后，合并sign.crt和intermediate.pem的内容成 chained.pem
     let sign_crt_path = format!("{}/{}", cfg.acme_dir, DOMAIN_CRT);
@@ -325,9 +355,9 @@ impl CA for GoogleTrust {
     }
     fn intermediate_crt_url(&self, is_ecc: bool) -> &'static str {
         if is_ecc {
-            URL_ZERO_INTERMEDIATE_ECC
+            URL_GTS_INTERMEDIATE_ECC
         } else {
-            URL_ZERO_INTERMEDIATE_RSA
+            URL_GTS_INTERMEDIATE_RSA
         }
     }
 }
@@ -370,9 +400,9 @@ impl AcmeCa {
             _ => None,
         }
     }
-    fn intermediate_crt_url(&self, is_ecc: bool) -> String {
-        self.ca().intermediate_crt_url(is_ecc).to_string()
-    }
+    // fn intermediate_crt_url(&self, is_ecc: bool) -> String {
+    //     self.ca().intermediate_crt_url(is_ecc).to_string()
+    // }
     fn ca(&self) -> &dyn CA {
         match self {
             AcmeCa::LetsEncrypt(ca) => ca.as_ref(),
@@ -895,7 +925,7 @@ async fn _post_kid(
     alg: &str,
     kid: &str,
     payload: Option<Payload>,
-) -> Result<(reqwest::header::HeaderMap, String), AcmeError> {
+) -> Result<(reqwest::header::HeaderMap, String, u16), AcmeError> {
     let protected = Protected::from_kid(&url, nonce, alg, kid);
     let sig_body = SigBody::from(payload, protected, file_path)?;
     _http_json(&url, sig_body.to_string()?, Method::POST).await
@@ -904,7 +934,7 @@ async fn _http_json(
     url: &str,
     body: Option<String>,
     method: Method,
-) -> Result<(reqwest::header::HeaderMap, String), AcmeError> {
+) -> Result<(reqwest::header::HeaderMap, String, u16), AcmeError> {
     //let params: HashMap<&str, &str> = [("host", h), ("type", "auto")].into_iter().collect();
     debug!("==> HTTP {:?}: {}\nbody: {:?}", &method, url, &body);
 
@@ -930,14 +960,17 @@ async fn _http_json(
     let (c, h) = (response.status().as_u16(), response.headers().clone());
     debug!("<== Response: {}, header: {:?}", c, response.headers());
 
-    if !response.status().is_success() {
-        warn!("{}", response.text().await?);
-        AcmeError::tip(&format!("{}Error", c))
-    } else {
-        let res = response.text().await?;
-        debug!("<== Response: {}", res);
-        Ok((h, res))
-    }
+    // if !response.status().is_success() {
+    //     warn!("{}", response.text().await?);
+    //     AcmeError::tip(&format!("{}Error", c))
+    // } else {
+    //     let res = response.text().await?;
+    //     debug!("<== Response: {}", res);
+    //     Ok((h, res))
+    // }
+    let res = response.text().await?;
+    debug!("<== Response: {}", res);
+    Ok((h, res, c))
     //Ok(response)
 }
 
@@ -999,12 +1032,17 @@ async fn _new_acct(
     //let payload_reg = "eyJ0ZXJtc09mU2VydmljZUFncmVlZCI6IHRydWV9"; //("termsOfServiceAgreed", true);
     // protected='{"nonce": "5yfKMBJJlBFlOD5krHoGQPfcIGi-ad7Ri5bfCjM2Hnys1Q8WBD8", "url": "https://acme-v02.api.letsencrypt.org/acme/new-acct", "alg": "ES256", "jwk": {"crv": "P-256", "kty": "EC", "x": "JP6zfy5Fey4_6jt6J3Tcq-d5dlK05_4r17OKtMTm6bc", "y": "rDQt-nR5riRjwhDVx5D2IoZZZ9YDyWOaqE2P4GaY0UA"}}'
     // let jwk_alg = _print_key_by_cmd_openssl(&file_path, is_ecc);
+    let eab = &cfg.eab;
+    let kid = if eab.success {
+        &format!(".{}", eab.eab_kid.clone().unwrap())
+    } else {
+        ""
+    };
     let acme_ca_dir = &cfg.acme_ca_dir;
-    let _cache_path = format!("{0}{1}", &acme_ca_dir, PATH_CACHE_KID); //cache
+    let _cache_path = format!("{0}{1}{2}", &acme_ca_dir, PATH_CACHE_KID, kid); //cache
     if let Some(s) = _read_cache(&_cache_path) {
         return Ok((nonce, s));
     }
-    let eab = &cfg.eab;
 
     let payload = if let Some(email) = &cfg.email {
         let eab = if eab.success {
@@ -1062,7 +1100,7 @@ async fn _new_order(
 }
 
 async fn _auth_domain(
-    url: String,
+    url: &str,
     nonce: String,
     file_path: &str,
     alg: &str,
@@ -1092,6 +1130,9 @@ async fn _chall_domain(url: &str, nonce: String, file_path: &str, alg: &str, kid
     //protected='{"nonce": "I4RLVp830DhlbzGGoGqxd90G_wxxqbI25XFqmD1fxqaPMj4H_Os", "url": "https://acme-v02.api.letsencrypt.org/acme/chall-v3/366261494887/3xX-Gg", "alg": "ES256", "kid": "https://acme-v02.api.letsencrypt.org/acme/acct/1792176437"}'
     let res = _post_kid(&url, nonce, file_path, alg, kid, Payload::_new_chall()).await?;
     let nonce = _get_header(HEADER_REPLAY_NONCE, &res.0);
+    if res.2 > 300 {
+        return Ok((nonce, false));
+    }
     let or_: OrderResChall = serde_json::from_str(&res.1)?;
     Ok((nonce, or_.status == STATUS_OK))
 }
