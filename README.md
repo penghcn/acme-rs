@@ -22,7 +22,7 @@ email   | -    | Register account email
 eab_kid | -    | `<eab_kid>`, for Google Trust Services
 eab_key | -    | `<eab_hmac_key>`, for Google Trust Services
 ca      | le   | Case-insensitive. The defalut is "le", which stands for Let's Encrypt. ZeroSSL can be abbreviated as "Z","z","zero". Google Trust Services as "g"
-alg     | ec3  | Case-insensitive. Algorithm abbreviation: ec2,ec3,ec5,rsa2,rsa4, which are secp256r1,secp384r1,secp521r1,rsa2048,rsa4096
+alg     | ec3  | Case-insensitive. Algorithm abbreviation: ec2,ec3,rsa2,rsa4, which are secp256r1,secp384r1,rsa2048,rsa4096
 log     | info | Case-insensitive. Log level: info,debug,trace
 
 4) Nginx configuration.
