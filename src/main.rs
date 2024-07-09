@@ -129,7 +129,7 @@ async fn acme_run(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError> {
 
     if _read_cache(&account_key_path).is_none() {
         let _ = _gen_key_by_cmd_openssl(&account_key_path, &acccount_alg);
-        let kid_cache_path = format!("{0}{1}", cfg.acme_ca_dir, PATH_CACHE_KID);
+        let kid_cache_path = format!("{0}{1}{2}", cfg.acme_ca_dir, PATH_CACHE_KID, &cfg.eab._kid());
         let kid_cache_path = Path::new(&kid_cache_path);
         if kid_cache_path.exists() {
             fs::remove_file(kid_cache_path)?; //同时删除cache.kid
@@ -636,6 +636,14 @@ impl Eab {
     fn _clone(eab: &Eab) -> Option<Self> {
         Some(Self::new(eab.eab_kid.clone(), eab.eab_hmac_key.clone()))
     }
+
+    fn _kid(&self) -> String {
+        if self.success {
+            format!(".{}", self.eab_kid.clone().unwrap())
+        } else {
+            "".to_string()
+        }
+    }
 }
 
 #[derive(Deserialize, Debug)]
@@ -1031,13 +1039,8 @@ async fn _new_acct(
     // protected='{"nonce": "5yfKMBJJlBFlOD5krHoGQPfcIGi-ad7Ri5bfCjM2Hnys1Q8WBD8", "url": "https://acme-v02.api.letsencrypt.org/acme/new-acct", "alg": "ES256", "jwk": {"crv": "P-256", "kty": "EC", "x": "JP6zfy5Fey4_6jt6J3Tcq-d5dlK05_4r17OKtMTm6bc", "y": "rDQt-nR5riRjwhDVx5D2IoZZZ9YDyWOaqE2P4GaY0UA"}}'
     // let jwk_alg = _print_key_by_cmd_openssl(&file_path, is_ecc);
     let eab = &cfg.eab;
-    let kid = if eab.success {
-        &format!(".{}", eab.eab_kid.clone().unwrap())
-    } else {
-        ""
-    };
     let acme_ca_dir = &cfg.acme_ca_dir;
-    let _cache_path = format!("{0}{1}{2}", &acme_ca_dir, PATH_CACHE_KID, kid); //cache
+    let _cache_path = format!("{0}{1}{2}", &acme_ca_dir, PATH_CACHE_KID, eab._kid()); //cache
     if let Some(s) = _read_cache(&_cache_path) {
         return Ok((nonce, s));
     }
