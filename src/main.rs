@@ -84,12 +84,13 @@ async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect(); // 获取所有的命令行参数，跳过第一个参数（程序路径）
     info!("Get args: {:?}", &args);
 
-    let cfg = AcmeCfg::new(args);
-    if let Err(_e) = cfg {
-        info!("{:?}", _e);
-        return; //中断
-    }
-    let cfg = cfg.unwrap();
+    let cfg = match AcmeCfg::new(args) {
+        Err(_e) => {
+            info!("{:?}", _e);
+            return; //中断
+        }
+        Ok(cfg) => cfg,
+    };
 
     //set log
     log::set_max_level(cfg.log_level);
