@@ -1,7 +1,7 @@
 use base64::{engine::general_purpose::URL_SAFE, Engine as _};
 use chrono::Local;
 use hmac::{Hmac, Mac};
-use log::{debug, info, trace, warn, Level, LevelFilter, Log, Record};
+use log::{debug, error, info, trace, warn, Level, LevelFilter, Log, Record};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -63,6 +63,7 @@ const HEADER_REPLAY_NONCE: &str = "replay-nonce";
 const HEADER_LOCATION: &str = "location";
 const TYPE_HTTP: &str = "http-01";
 const STATUS_OK: &str = "valid"; //valid. pending, ready, processing. invalid
+const STATUS_PENDING: &str = "pending"; //valid. pending, ready, processing. invalid
 
 const TIP_MISSING_DNS: &str = "Missing parameter 'dns'";
 const TIP_MISSING_DIR: &str = "Missing parameter 'dir'";
@@ -86,7 +87,7 @@ async fn main() {
 
     let cfg = match AcmeCfg::new(args) {
         Err(_e) => {
-            info!("{:?}", _e);
+            error!("{}", _e.to_string());
             return; //中断
         }
         Ok(cfg) => cfg,
@@ -97,8 +98,8 @@ async fn main() {
 
     // ssl_certificate .../le_ssl_chained.pem;
     // ssl_certificate_key .../le_ssl_domain.key;
-    match acme_run(cfg).await {
-        Err(_e) => warn!("{}", _e.to_string()),
+    match acme_issue(cfg).await {
+        Err(_e) => error!("{}", _e.to_string()),
         Ok(paths) => {
             info!(
                 "Successfully.\nFor Nginx configuration:\n\tssl_certificate {1}\n\tssl_certificate_key {2}
@@ -109,21 +110,21 @@ async fn main() {
     }
 }
 
-async fn acme_run(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError> {
+async fn acme_issue(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError> {
     // 0 初始化参数，获取或者默认值
     info!("Step 1 Init Params: {:?}", cfg);
 
-    // 1 init获取接口  /directory
+    // 1 获取接口  /directory
     let dir = _directory(cfg.ca.directory_url()).await?;
     info!("Step 2 GET Directory. {:?}", dir);
-    let external_account_required = dir.meta.external_account_required.unwrap_or(false);
+    let required_external_account = dir.meta.external_account_required.unwrap_or(false);
 
     // 1.1 是否需要扩展账户信息eab，目前就是zerossl,gts
-    if external_account_required & cfg.email.is_none() {
+    if required_external_account & cfg.email.is_none() {
         return AcmeError::tip(TIP_REQUIRED_EMAIL);
     }
 
-    // 3.1 先获取或生成 account.key, 通过参数指定(参考enum Alg)， 目前支持 rsa2048,rsa4096,prime256v1,prime384v1,prime512v1
+    // 3.1 先获取或生成 account.key，默认ecc256
     let account_key_path = format!("{0}{1}", cfg.acme_ca_dir, PATH_ACCOUNT_KEY);
     let acccount_alg = Alg::new(ACCOUNT_ALG_DEFAULT_EC2); //cfg.alg;
 
@@ -164,11 +165,29 @@ async fn acme_run(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError> {
         let (nonce, auth_order_res) = _auth_domain(&_authz_url, mut_nonce, &account_key_path, &alg, &kid).await?;
         mut_nonce = nonce;
 
-        let is_ok = auth_order_res.is_ok();
+        let (is_ok, is_pending) = (auth_order_res.is_ok(), auth_order_res.is_pending());
         let (domain, challenges) = (auth_order_res.identifier.unwrap().value, auth_order_res.challenges.unwrap());
         if is_ok {
             info!("Verifyed {0}.", domain);
             continue;
+        }
+
+        if !is_pending {
+            let mut attempts: u8 = 0; //轮询auth
+            loop {
+                let (nonce, auth_order_res) = _auth_domain(&_authz_url, mut_nonce, &account_key_path, &alg, &kid).await?;
+                mut_nonce = nonce;
+                if auth_order_res.is_ok() || auth_order_res.is_pending() {
+                    break;
+                }
+                attempts += 1;
+
+                if attempts == MAX_TRY {
+                    return AcmeError::tip(TIP_MAX_TRY);
+                }
+                let _ = std::thread::sleep(SLEEP_DURATION_SEC_2);
+                debug!("Loop {}/{}, auth domain", attempts, MAX_TRY);
+            }
         }
 
         info!("Verifying {0}...", domain);
@@ -177,22 +196,6 @@ async fn acme_run(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError> {
             Some(chall) => chall,
             None => return AcmeError::tip(TIP_TYPE_HTTP_FAILED),
         };
-
-        let mut attempts: u8 = 0; //轮询auth
-        loop {
-            let (nonce, auth_order_res) = _auth_domain(&_authz_url, mut_nonce, &account_key_path, &alg, &kid).await?;
-            mut_nonce = nonce;
-            if auth_order_res.is_ok() || auth_order_res.status == "pending" {
-                break;
-            }
-            attempts += 1;
-
-            if attempts == MAX_TRY {
-                return AcmeError::tip(TIP_MAX_TRY);
-            }
-            let _ = std::thread::sleep(SLEEP_DURATION_SEC_2);
-            debug!("Loop {}/{}, auth domain", attempts, MAX_TRY);
-        }
 
         let well_known_path = _write_to_challenges(chall.token, &domain, &cfg.acme_root, &thumbprint).await?;
 
@@ -216,6 +219,7 @@ async fn acme_run(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError> {
     }
 
     // 4.3 finalize csr
+    // domain key 算法默认ECC384，通过参数指定(参考enum Alg)，目前支持 rsa2048,rsa4096,prime256v1,prime384v1
     let (csr, domain_key_path) = _gen_csr_by_cmd_openssl(&cfg.acme_dir, &cfg.domain_alg, &cfg.dns)?;
 
     info!("Step 4.3 Finalize domain with csr.");
@@ -228,8 +232,7 @@ async fn acme_run(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError> {
     if or.is_ok() {
         cert_url = or.certificate;
     } else {
-        //轮询
-        let mut attempts: u8 = 0;
+        let mut attempts: u8 = 0; //轮询
         loop {
             let (nonce, or) = _order_status(&os_url, mut_nonce, &account_key_path, &alg, &kid).await?;
             mut_nonce = nonce;
@@ -262,7 +265,7 @@ async fn acme_run(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError> {
             _http_json(&_intermediate_crt_url, None, Method::GET).await?.1
         }
         _ => "".to_string(),
-    };
+    }; // TODO gts返回的是full chained要切割成sign.crt
 
     // 5.1、最后，合并sign.crt和intermediate.pem的内容成 chained.pem
     let sign_crt_path = format!("{}/{}", cfg.acme_dir, DOMAIN_CRT);
@@ -912,6 +915,9 @@ struct OrderRes {
 impl OrderRes {
     fn is_ok(&self) -> bool {
         self.status == STATUS_OK
+    }
+    fn is_pending(&self) -> bool {
+        self.status == STATUS_PENDING
     }
 }
 
