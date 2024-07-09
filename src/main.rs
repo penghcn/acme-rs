@@ -99,14 +99,14 @@ async fn main() {
     // ssl_certificate_key .../le_ssl_domain.key;
     match acme_run(cfg).await {
         Err(_e) => warn!("{}", _e.to_string()),
-        Ok((sign_crt_path, chained_pem_path, domain_key_path)) => {
+        Ok(paths) => {
             info!(
                 "Successfully.\nFor Nginx configuration:\n\tssl_certificate {0}\n\tssl_certificate_key {1}",
-                chained_pem_path, domain_key_path
+                paths.1, paths.2
             );
             info!(
                 "\nFor Apache configuration:\n\tSSLEngine on\n\tSSLCertificateFile {0}\n\tSSLCertificateKeyFile {1}\n\tSSLCertificateChainFile {2}",
-                sign_crt_path, chained_pem_path, domain_key_path
+                paths.0, paths.1, paths.2
             );
         }
     }
