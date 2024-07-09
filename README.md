@@ -12,6 +12,14 @@ cargo run --  dns=ai8.rs,www.ai8.rs dir=/www/ai8.rs
 cargo run --  dns=ai8.rs,www.ai8.rs dir=/www/ai8.rs ca=z email=a@a.rs alg=rsa4
 ```
 
+Google Trust Services. 
+
+[Get Google Cloud EAB](./gcloud-eab.md) or [参考 Google Cloud 的 EAB 获取](./gcloud-eab-zh.md)
+
+```
+cargo run --  dns=ai8.rs,www.ai8.rs dir=/www/ai8.rs ca=g email=a@a.rs eab_kid=... eab_key=...
+```
+
 3) For more parameter configurations, please refer to the following.
 
 key | default | description
@@ -56,7 +64,6 @@ log     | info | Case-insensitive. Log level: info,debug,trace
         location / {
             proxy_set_header    X-Real-IP       $remote_addr;
             proxy_set_header    X-Forwarded-For $proxy_add_x_forwarded_for;
-            #proxy_set_header   Host            $http_host;
             proxy_set_header    X-NginX-Proxy   true;
             proxy_pass          https://www.bing.com;
         }
