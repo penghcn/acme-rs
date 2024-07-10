@@ -20,12 +20,13 @@ const URL_LE_INTERMEDIATE_ECC: &str = "https://letsencrypt.org/certs/2024/e6.pem
 
 const URL_ZERO: &str = "https://acme.zerossl.com/v2/DV90";
 const URL_ZERO_EAB: &str = "https://api.zerossl.com/acme/eab-credentials-email";
-const URL_ZERO_INTERMEDIATE_RSA: &str = "https://crt.sh/?d=1282303295"; // https://help.zerossl.com/hc/en-us/articles/360060198034-Legacy-Client-Compatibility-Cross-Signed-Root-Certificates
-const URL_ZERO_INTERMEDIATE_ECC: &str = "https://crt.sh/?d=1282303296";
+//const URL_ZERO_INTERMEDIATE_RSA: &str = "https://crt.sh/?d=1282303295"; // https://help.zerossl.com/hc/en-us/articles/360060198034-Legacy-Client-Compatibility-Cross-Signed-Root-Certificates
+//const URL_ZERO_INTERMEDIATE_ECC: &str = "https://crt.sh/?d=1282303296";
 
-const URL_GOOGLE_TRUST: &str = "https://dv.acme-v02.api.pki.goog/directory"; //注意大陆境内，该链接无法访问
-const URL_GTS_INTERMEDIATE_RSA: &str = "https://pki.goog/roots.pem"; // https://pki.goog/faq/#faq-27
-const URL_GTS_INTERMEDIATE_ECC: &str = "https://pki.goog/roots.pem"; // 使用的是rsa，无独立的ecc证书链
+//注意大陆境内，该链接无法访问
+const URL_GOOGLE_TRUST: &str = "https://dv.acme-v02.api.pki.goog/directory";
+//const URL_GTS_INTERMEDIATE_RSA: &str = "https://pki.goog/roots.pem"; // https://pki.goog/faq/#faq-27
+//const URL_GTS_INTERMEDIATE_ECC: &str = "https://pki.goog/roots.pem"; // 使用的是rsa，无独立的ecc证书链
 
 const DIR_CA_LE: &str = "/letsencrypt/v02";
 const DIR_CA_ZERO: &str = "/zerossl/v2/DV90";
@@ -40,6 +41,12 @@ const PATH_ACCOUNT_KEY: &str = "/account.key";
 const DOMAIN_KEY: &str = "domain.key";
 const DOMAIN_CRT: &str = "sign.crt";
 const CHAINED_CRT: &str = "chained.crt";
+
+const CERT_BEGIN: &str = "-----BEGIN CERTIFICATE-----";
+const CERT_REGEX: &str = r"-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----";
+
+const PUB_ECC_REGEX: &str = r"pub:\n\s+([0-9a-fA-F:]+(?:\n\s+[0-9a-fA-F:]+)*)";
+const PUB_RSA_REGEX: &str = r"modulus:[\s]+?00:([a-f0-9\:\s]+?)\npublicExponent: ([0-9]+)";
 
 const CA_DEFAULT_LE: &str = "le";
 const ACCOUNT_ALG_DEFAULT_EC2: &str = "EC2"; //acme接口签名等使用ecc256签名
@@ -73,6 +80,7 @@ const TIP_DOWN_CRT_FAILED: &str = "Download certificate failed, exiting.";
 const TIP_MAX_TRY: &str = "Maximum attempts reached, exiting.";
 const TIP_EAB_FAILED: &str = "Get Eab Fialed.";
 const TIP_TYPE_HTTP_FAILED: &str = "Get challenges http-01 Fialed.";
+const TIP_REGEX_FAILED: &str = "Match Regex Fialed.";
 
 // acme规范参考 https://datatracker.ietf.org/doc/html/rfc8555#section-7.2
 #[tokio::main]
@@ -256,24 +264,23 @@ async fn acme_issue(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError>
         None => return AcmeError::tip(TIP_DOWN_CRT_FAILED),
     };
     info!("Step 4.4 Download certificate file. Named {}", DOMAIN_CRT);
-    let sign_crt = _down_certificate(&cert_url, mut_nonce, &account_key_path, &alg, &kid).await?;
-
-    info!("Step 4.5 Download ca intermediate file. Named intermediate.pem");
-    let _intermediate_pem = match cfg.ca {
-        AcmeCa::LetsEncrypt(ca) | AcmeCa::ZeroSSL(ca) => {
-            let _intermediate_crt_url = ca.intermediate_crt_url(acccount_alg.is_ecc());
-            _http_json(&_intermediate_crt_url, None, Method::GET).await?.1
-        }
-        _ => "".to_string(),
-    }; // TODO gts返回的是full chained要切割成sign.crt
+    let domain_crt = _down_certificate(&cert_url, mut_nonce, &account_key_path, &alg, &kid).await?;
 
     // 5.1、最后，合并sign.crt和intermediate.pem的内容成 chained.pem
-    let sign_crt_path = format!("{}/{}", cfg.acme_dir, DOMAIN_CRT);
+    let domain_crt_path = format!("{}/{}", cfg.acme_dir, DOMAIN_CRT);
     let chained_pem_path = format!("{}/{}", cfg.acme_dir, CHAINED_CRT);
-    info!("Step 5.1 Combine {} and intermediate.pem", DOMAIN_CRT);
+    info!("Step 5.1 Wirte to {} and {}", DOMAIN_CRT, CHAINED_CRT);
 
-    let _ = _write_to_file(&sign_crt_path, &sign_crt)?;
-    let _ = _write_to_file(&chained_pem_path, &format!("{0}\n{1}", sign_crt, _intermediate_pem))?;
+    let (domain_pem, chained_pem) = match cfg.ca.intermediate_crt_url(acccount_alg.is_ecc()) {
+        Some(_url) => {
+            info!("Download ca intermediate file. Named intermediate.pem");
+            let _intermediate_pem = _http_json(&_url, None, Method::GET).await?.1;
+            (domain_crt.as_str(), &format!("{0}\n{1}", domain_crt, _intermediate_pem))
+        }
+        None => (_split_cert_chained(&domain_crt)?, &domain_crt),
+    };
+    let _ = _write_to_file(&domain_crt_path, &domain_pem)?;
+    let _ = _write_to_file(&chained_pem_path, &chained_pem)?;
 
     // 5.2、复制小文件到备份目录
     let bk_no = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
@@ -286,7 +293,7 @@ async fn acme_issue(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError>
         fs::create_dir_all(bk_dir_path)?; // 递归创建目录
     }
 
-    let _ = fs::copy(&sign_crt_path, format!("{}/{}.{}", bk_dir, bk_no, DOMAIN_CRT))?;
+    let _ = fs::copy(&domain_crt_path, format!("{}/{}.{}", bk_dir, bk_no, DOMAIN_CRT))?;
     let _ = fs::copy(&chained_pem_path, format!("{}/{}.{}", bk_dir, bk_no, CHAINED_CRT))?;
     let _ = fs::copy(&domain_key_path, format!("{}/{}.{}", bk_dir, bk_no, DOMAIN_KEY))?;
 
@@ -296,12 +303,12 @@ async fn acme_issue(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError>
         if !Path::new(&ssl_dir).exists() {
             return AcmeError::tip(&format!("The directory does not exist: {}", &ssl_dir));
         }
-        let _ = fs::copy(&sign_crt_path, format!("{}/{}", ssl_dir, DOMAIN_CRT))?;
+        let _ = fs::copy(&domain_crt_path, format!("{}/{}", ssl_dir, DOMAIN_CRT))?;
         let _ = fs::copy(&chained_pem_path, format!("{}/{}", ssl_dir, CHAINED_CRT))?;
         let _ = fs::copy(&domain_key_path, format!("{}/{}", ssl_dir, DOMAIN_KEY))?;
     }
 
-    let result = (sign_crt_path, chained_pem_path, domain_key_path);
+    let result = (domain_crt_path, chained_pem_path, domain_key_path);
 
     Ok(result)
 }
@@ -309,7 +316,7 @@ async fn acme_issue(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError>
 trait CA {
     fn ca_dir(&self) -> &'static str;
     fn directory_url(&self) -> &'static str;
-    fn intermediate_crt_url(&self, is_ecc: bool) -> &'static str;
+    fn intermediate_crt_url(&self, is_ecc: bool) -> Option<&'static str>;
 }
 struct LetsEncrypt;
 struct ZeroSSL;
@@ -322,12 +329,12 @@ impl CA for LetsEncrypt {
     fn directory_url(&self) -> &'static str {
         URL_LE
     }
-    fn intermediate_crt_url(&self, is_ecc: bool) -> &'static str {
-        if is_ecc {
+    fn intermediate_crt_url(&self, is_ecc: bool) -> Option<&'static str> {
+        Some(if is_ecc {
             URL_LE_INTERMEDIATE_ECC
         } else {
             URL_LE_INTERMEDIATE_RSA
-        }
+        })
     }
 }
 
@@ -338,12 +345,9 @@ impl CA for ZeroSSL {
     fn directory_url(&self) -> &'static str {
         URL_ZERO
     }
-    fn intermediate_crt_url(&self, is_ecc: bool) -> &'static str {
-        if is_ecc {
-            URL_ZERO_INTERMEDIATE_ECC
-        } else {
-            URL_ZERO_INTERMEDIATE_RSA
-        }
+    fn intermediate_crt_url(&self, is_ecc: bool) -> Option<&'static str> {
+        let _ = is_ecc;
+        None
     }
 }
 
@@ -354,12 +358,9 @@ impl CA for GoogleTrust {
     fn directory_url(&self) -> &'static str {
         URL_GOOGLE_TRUST
     }
-    fn intermediate_crt_url(&self, is_ecc: bool) -> &'static str {
-        if is_ecc {
-            URL_GTS_INTERMEDIATE_ECC
-        } else {
-            URL_GTS_INTERMEDIATE_RSA
-        }
+    fn intermediate_crt_url(&self, is_ecc: bool) -> Option<&'static str> {
+        let _ = is_ecc;
+        None
     }
 }
 
@@ -401,9 +402,9 @@ impl AcmeCa {
             _ => None,
         }
     }
-    // fn intermediate_crt_url(&self, is_ecc: bool) -> String {
-    //     self.ca().intermediate_crt_url(is_ecc).to_string()
-    // }
+    fn intermediate_crt_url(&self, is_ecc: bool) -> Option<String> {
+        self.ca().intermediate_crt_url(is_ecc).map(|s| s.to_string())
+    }
     fn ca(&self) -> &dyn CA {
         match self {
             AcmeCa::LetsEncrypt(ca) => ca.as_ref(),
@@ -532,6 +533,7 @@ enum AcmeError {
     IoError(std::io::Error),
     TimeError(std::time::SystemTimeError),
     SerdeJsonError(serde_json::Error),
+    RegexError(regex::Error),
     Tip(String), // 自定义错误
 }
 
@@ -556,6 +558,11 @@ impl From<serde_json::Error> for AcmeError {
         AcmeError::SerdeJsonError(error)
     }
 }
+impl From<regex::Error> for AcmeError {
+    fn from(error: regex::Error) -> Self {
+        AcmeError::RegexError(error)
+    }
+}
 
 impl AcmeError {
     fn to_string(&self) -> String {
@@ -564,6 +571,7 @@ impl AcmeError {
             AcmeError::IoError(_e) => _e.to_string(),
             AcmeError::TimeError(_e) => _e.to_string(),
             AcmeError::SerdeJsonError(_e) => _e.to_string(),
+            AcmeError::RegexError(_e) => _e.to_string(),
             AcmeError::Tip(_e) => _e.to_string(),
         }
     }
@@ -704,14 +712,14 @@ impl Jwk {
     fn call(out: &str, is_ecc: bool) -> Result<Self, AcmeError> {
         //let is_ecc= out.starts_with("Private-Key:");
         if is_ecc {
-            let pub_ = _regx(&out, r"pub:\n\s+([0-9a-fA-F:]+(?:\n\s+[0-9a-fA-F:]+)*)", true);
+            let pub_ = _regx(&out, PUB_ECC_REGEX, true);
             let crv = _regx(&out, r"NIST CURVE: (.*)", false);
 
             let offset = pub_.len() / 2 + 1;
             let (x, y) = (_base64_hex(&pub_[2..offset]), _base64_hex(&pub_[offset..]));
             Ok(Self::_Ecc(JwkEcc::new(crv, x, y)))
         } else {
-            let pub_ = _regx(&out, r"modulus:[\s]+?00:([a-f0-9\:\s]+?)\npublicExponent: ([0-9]+)", true);
+            let pub_ = _regx(&out, PUB_RSA_REGEX, true);
             let e = _regx(&out, r"0x([A-Fa-f0-9]+)", false);
             let e = if e.len() % 2 == 0 { e } else { format!("0{}", e) };
             println!("{}: {}", &e, &pub_);
@@ -1137,7 +1145,7 @@ async fn _chall_domain(url: &str, nonce: String, file_path: &str, alg: &str, kid
     //protected='{"nonce": "I4RLVp830DhlbzGGoGqxd90G_wxxqbI25XFqmD1fxqaPMj4H_Os", "url": "https://acme-v02.api.letsencrypt.org/acme/chall-v3/366261494887/3xX-Gg", "alg": "ES256", "kid": "https://acme-v02.api.letsencrypt.org/acme/acct/1792176437"}'
     let res = _post_kid(&url, nonce, file_path, alg, kid, Payload::_new_chall()).await?;
     let nonce = _get_header(HEADER_REPLAY_NONCE, &res.0);
-    if res.2 > 300 {
+    if res.2 > 205 {
         return Ok((nonce, false));
     }
     let or_: OrderResChall = serde_json::from_str(&res.1)?;
@@ -1176,7 +1184,11 @@ async fn _order_status(
 }
 
 async fn _down_certificate(url: &str, nonce: String, file_path: &str, alg: &str, kid: &str) -> Result<String, AcmeError> {
-    Ok(_post_kid(&url, nonce, file_path, alg, kid, None).await?.1)
+    let res = _post_kid(&url, nonce, file_path, alg, kid, None).await?;
+    if res.2 != 200 {
+        return AcmeError::tip(TIP_DOWN_CRT_FAILED);
+    }
+    Ok(res.1)
 }
 
 fn _base64_hmac256(key: &str, s: &str) -> String {
@@ -1262,6 +1274,23 @@ fn _write_to_file(file_path: &str, s: &str) -> Result<(), AcmeError> {
         .map_err(|_| AcmeError::Tip(format!("Write failed: {}", file_path)));
     debug!("Write to {}", file_path);
     Ok(())
+}
+
+// 分隔，第一个是domain.crt
+fn _split_cert_chained(crt_str: &str) -> Result<&str, AcmeError> {
+    if crt_str.matches(CERT_BEGIN).count() == 1 {
+        warn!("Not full chained crt");
+        return Ok(crt_str);
+    }
+    let cert_regex = Regex::new(CERT_REGEX)?;
+
+    if let Some(cap) = cert_regex.captures(&crt_str) {
+        let first_cert = cap.get(0).map_or("", |m| m.as_str());
+        debug!("Split domain cert by chained\n{}", &first_cert);
+        Ok(first_cert)
+    } else {
+        return AcmeError::tip(TIP_REGEX_FAILED);
+    }
 }
 
 fn _print_key_by_cmd_openssl(account_key_path: &str, is_ecc: bool) -> Result<Jwk, AcmeError> {
