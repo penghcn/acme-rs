@@ -1,5 +1,5 @@
 use base64::{engine::general_purpose::URL_SAFE, Engine as _};
-use chrono::Local;
+use chrono::{Duration as ChronoDuration, Local, NaiveDateTime, TimeZone};
 use hmac::{Hmac, Mac};
 use log::{debug, error, info, trace, warn, Level, LevelFilter, Log, Record};
 use regex::Regex;
@@ -11,8 +11,9 @@ use std::{
     io::Write,
     path::Path,
     process::{Command, Output, Stdio},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+use tokio::time::sleep_until;
 
 const URL_LE: &str = "https://acme-v02.api.letsencrypt.org/directory";
 const URL_LE_INTERMEDIATE_RSA: &str = "https://letsencrypt.org/certs/2024/r11.pem"; // https://letsencrypt.org/zh-cn/certificates/
@@ -48,6 +49,8 @@ const CERT_REGEX: &str = r"-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICA
 const PUB_ECC_REGEX: &str = r"pub:\n\s+([0-9a-fA-F:]+(?:\n\s+[0-9a-fA-F:]+)*)";
 const PUB_RSA_REGEX: &str = r"modulus:[\s]+?00:([a-f0-9\:\s]+?)\npublicExponent: ([0-9]+)";
 
+const CRON_DEFAULT_DAYS: i64 = 88; //每隔88天
+const CRON_DEFAULT_HOUR: u32 = 0; //下一次0点执行
 const CA_DEFAULT_LE: &str = "le";
 const ACCOUNT_ALG_DEFAULT_EC2: &str = "EC2"; //acme接口签名等使用ecc256签名
 const DOMAIN_ALG_DEFAULT_EC3: &str = "EC3"; //域名默认使用ecc384算法，可通过alg参数自定义
@@ -101,24 +104,78 @@ async fn main() {
         Ok(cfg) => cfg,
     };
 
-    //set log
+    // set log
     log::set_max_level(cfg.log_level);
 
-    // ssl_certificate .../le_ssl_chained.pem;
-    // ssl_certificate_key .../le_ssl_domain.key;
-    match acme_issue(cfg).await {
-        Err(_e) => error!("{}", _e.to_string()),
-        Ok(paths) => {
-            info!(
-                "Successfully.\nFor Nginx configuration:\n\tssl_certificate {1}\n\tssl_certificate_key {2}
-				\nFor Apache configuration:\n\tSSLEngine on\n\tSSLCertificateFile {0}\n\tSSLCertificateKeyFile {1}\n\tSSLCertificateChainFile {2}",
-                paths.0, paths.1, paths.2
-            );
-        }
+    // quartz
+    // let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(90 * 24 * 60 * 60)); //90天
+    // loop {
+    //     interval.tick().await;
+    //     let _ = acme_issue3(&cfg).await;
+    // }
+
+    if let Err(_e) = _simple_cron(&cfg, CRON_DEFAULT_DAYS, CRON_DEFAULT_HOUR).await {
+        error!("{}", _e.to_string());
     }
 }
 
-async fn acme_issue(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError> {
+async fn _simple_cron(cfg: &AcmeCfg, days: i64, hour: u32) -> Result<(), AcmeError> {
+    let mut next_execution = Local::now().naive_local(); //_next_execution(Utc::now().naive_utc(), days, hour);
+    loop {
+        let future = sleep_until(_tokio_instant(next_execution)?);
+        tokio::pin!(future);
+        future.await;
+
+        let _ = acme_issue3(&cfg).await;
+
+        let next_date = next_execution + ChronoDuration::days(days);
+        next_execution = next_date.date().and_hms_opt(hour, 0, 0).unwrap();
+    }
+}
+
+fn _tokio_instant(next_execution: NaiveDateTime) -> Result<tokio::time::Instant, AcmeError> {
+    let datetime = Local.from_local_datetime(&next_execution).unwrap();
+    // 将 DateTime<Utc> 转换为 Instant
+    let tt = datetime.timestamp();
+    let st = SystemTime::UNIX_EPOCH + Duration::from_secs(tt as u64);
+    let it = Instant::now();
+    let instant = st.duration_since(SystemTime::now()).ok().map_or(it, |d| it + d);
+
+    info!("Next execution: {:?}, {}, {:?}", datetime, tt, instant);
+    Ok(tokio::time::Instant::from_std(instant))
+}
+
+// fn _next_execution(now: NaiveDateTime, days: i64, hour: u32) -> NaiveDateTime {
+//     let mut execution_date = now.date().and_hms_opt(hour, 0, 0).unwrap(); // 设置为当前日期的8点
+//     if execution_date < now {
+//         execution_date = execution_date + ChronoDuration::days(days); // 如果已经过了8点，就设置为下一个90天
+//     }
+//     while execution_date.signed_duration_since(now).num_days() % days != 0 {
+//         execution_date = execution_date + ChronoDuration::days(1);
+//     }
+//     execution_date
+// }
+
+async fn acme_issue3(cfg: &AcmeCfg) -> () {
+    // retry 2
+    for i in 0..3 {
+        match acme_issue(&cfg).await {
+            Err(_e) => error!("{}", _e.to_string()),
+            Ok(paths) => {
+                info!(
+        		"Successfully.\nFor Nginx configuration:\n\tssl_certificate {1}\n\tssl_certificate_key {2}
+        		\nFor Apache configuration:\n\tSSLEngine on\n\tSSLCertificateFile {0}\n\tSSLCertificateKeyFile {1}\n\tSSLCertificateChainFile {2}",
+        		paths.0, paths.1, paths.2
+        	);
+                return;
+            }
+        }
+        debug!("Loop {}/3, acme issue", i);
+        std::thread::sleep(SLEEP_DURATION_SEC_5);
+    }
+}
+
+async fn acme_issue(cfg: &AcmeCfg) -> Result<(String, String, String), AcmeError> {
     // 0 初始化参数，获取或者默认值
     info!("Step 1 Init Params: {:?}", cfg);
 
@@ -148,7 +205,7 @@ async fn acme_issue(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError>
 
     let jwk = _print_key_by_cmd_openssl(&account_key_path, acccount_alg.is_ecc())?;
     let alg = jwk.alg();
-    let thumbprint = _base64_sha256(&jwk.to_string());
+    let thumbprint = _base64_sha256(&jwk.to_string()?);
     debug!("\njwk: {:?}, thumbprint:{}", jwk, thumbprint);
 
     // 3.2 获取nonce接口  /acme/new-nonce
@@ -298,7 +355,7 @@ async fn acme_issue(cfg: AcmeCfg) -> Result<(String, String, String), AcmeError>
     let _ = fs::copy(&domain_key_path, format!("{}/{}.{}", bk_dir, bk_no, DOMAIN_KEY))?;
 
     //5.3 若需要，复制到指定的证书目录下，文件名不变
-    if let Some(ssl_dir) = cfg.ssl_dir {
+    if let Some(ssl_dir) = &cfg.ssl_dir {
         info!("Step 5.3 Copy to: {}", &ssl_dir);
         if !Path::new(&ssl_dir).exists() {
             return AcmeError::tip(&format!("The directory does not exist: {}", &ssl_dir));
@@ -736,8 +793,8 @@ impl Jwk {
             _ => "RS256".to_string(),
         }
     }
-    fn to_string(&self) -> String {
-        serde_json::to_string(&self).unwrap()
+    fn to_string(&self) -> Result<String, AcmeError> {
+        Ok(serde_json::to_string(&self)?)
     }
 }
 
@@ -1068,7 +1125,7 @@ async fn _new_acct(
             None
         };
         let osb = if let Some(eab) = eab {
-            let eab_payload64 = _base64(jwk.to_string().as_bytes());
+            let eab_payload64 = _base64(jwk.to_string()?.as_bytes());
             Some(SigBody::new(
                 eab_payload64,
                 Protected::from_eab(&url, ALG_HMAC_256, &eab.eab_kid.unwrap()),
