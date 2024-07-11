@@ -10,14 +10,14 @@ cargo run --  dns=ai8.rs,www.ai8.rs dir=/www/ai8.rs
 ```
 07/11 12:16:06.136 INFO  [main.rs:165] - Successfully.
 For Nginx configuration:
-    ssl_certificate /data/docker_conf/nginx/ssl/le/pengh.cn/.acme/chained.crt
-    ssl_certificate_key /data/docker_conf/nginx/ssl/le/pengh.cn/.acme/domain.key
+    ssl_certificate /www/ai8.rs/.acme/chained.crt
+    ssl_certificate_key /www/ai8.rs/.acme/domain.key
                 
 For Apache configuration:
     SSLEngine on
-    SSLCertificateFile /data/docker_conf/nginx/ssl/le/pengh.cn/.acme/sign.crt
-    SSLCertificateKeyFile /data/docker_conf/nginx/ssl/le/pengh.cn/.acme/chained.crt
-    SSLCertificateChainFile /data/docker_conf/nginx/ssl/le/pengh.cn/.acme/domain.key
+    SSLCertificateFile /www/ai8.rs/.acme/sign.crt
+    SSLCertificateKeyFile /www/ai8.rs/.acme/chained.crt
+    SSLCertificateChainFile /www/ai8.rs/.acme/domain.key
 07/11 12:16:06.137 INFO  [main.rs:144] - Next execution: 2024-10-07T00:00:00+08:00,1728230400 Instant { tv_sec: 16297041, tv_nsec: 684065965 }
 
 ```
