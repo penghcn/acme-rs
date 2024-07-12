@@ -26,8 +26,8 @@ const URL_ZERO_EAB: &str = "https://api.zerossl.com/acme/eab-credentials-email";
 
 //注意大陆境内，该链接无法访问
 const URL_GOOGLE_TRUST: &str = "https://dv.acme-v02.api.pki.goog/directory";
-//const URL_GTS_INTERMEDIATE_RSA: &str = "https://pki.goog/roots.pem"; // https://pki.goog/faq/#faq-27
-//const URL_GTS_INTERMEDIATE_ECC: &str = "https://pki.goog/roots.pem"; // 使用的是rsa，无独立的ecc证书链
+//const URL_GTS_INTERMEDIATE_RSA: &str = "https://i.pki.goog/r1.pem"; // https://pki.goog/repository/
+//const URL_GTS_INTERMEDIATE_ECC: &str = "https://i.pki.goog/r4.pem"; // https://i.pki.goog/we1x.pem
 
 const DIR_CA_LE: &str = "/letsencrypt/v02";
 const DIR_CA_ZERO: &str = "/zerossl/v2/DV90";
@@ -233,7 +233,7 @@ async fn acme_issue(cfg: &AcmeCfg) -> Result<(String, String, String), AcmeError
         let (is_ok, is_pending) = (auth_order_res.is_ok(), auth_order_res.is_pending());
         let (domain, challenges) = (auth_order_res.identifier.unwrap().value, auth_order_res.challenges.unwrap());
         if is_ok {
-            info!("Verifyed {0}.", domain);
+            info!("Verifyed {0}", domain);
             continue;
         }
 
@@ -373,11 +373,10 @@ async fn acme_issue(cfg: &AcmeCfg) -> Result<(String, String, String), AcmeError
 trait CA {
     fn ca_dir(&self) -> &'static str;
     fn directory_url(&self) -> &'static str;
-    fn intermediate_crt_url(&self, is_ecc: bool) -> Option<&'static str>;
 }
 struct LetsEncrypt;
 struct ZeroSSL;
-struct GoogleTrust;
+struct GoogleTrustServices;
 
 impl CA for LetsEncrypt {
     fn ca_dir(&self) -> &'static str {
@@ -385,13 +384,6 @@ impl CA for LetsEncrypt {
     }
     fn directory_url(&self) -> &'static str {
         URL_LE
-    }
-    fn intermediate_crt_url(&self, is_ecc: bool) -> Option<&'static str> {
-        Some(if is_ecc {
-            URL_LE_INTERMEDIATE_ECC
-        } else {
-            URL_LE_INTERMEDIATE_RSA
-        })
     }
 }
 
@@ -402,29 +394,21 @@ impl CA for ZeroSSL {
     fn directory_url(&self) -> &'static str {
         URL_ZERO
     }
-    fn intermediate_crt_url(&self, is_ecc: bool) -> Option<&'static str> {
-        let _ = is_ecc;
-        None
-    }
 }
 
-impl CA for GoogleTrust {
+impl CA for GoogleTrustServices {
     fn ca_dir(&self) -> &'static str {
         DIR_CA_GOOGLE_TRUST
     }
     fn directory_url(&self) -> &'static str {
         URL_GOOGLE_TRUST
     }
-    fn intermediate_crt_url(&self, is_ecc: bool) -> Option<&'static str> {
-        let _ = is_ecc;
-        None
-    }
 }
 
 enum AcmeCa {
     LetsEncrypt(Box<dyn CA>),
     ZeroSSL(Box<dyn CA>),
-    GoogleTrust(Box<dyn CA>),
+    GoogleTrustServices(Box<dyn CA>),
 }
 
 // 只是简单实现 Debug trait，并不会真实打印。编译器不会再报错
@@ -433,7 +417,7 @@ impl std::fmt::Debug for AcmeCa {
         match self {
             AcmeCa::LetsEncrypt(_) => write!(f, "AcmeCa::LetsEncrypt"),
             AcmeCa::ZeroSSL(_) => write!(f, "AcmeCa::ZeroSSL"),
-            AcmeCa::GoogleTrust(_) => write!(f, "AcmeCa::GoogleTrust"),
+            AcmeCa::GoogleTrustServices(_) => write!(f, "AcmeCa::GoogleTrustServices"),
         }
     }
 }
@@ -443,7 +427,7 @@ impl AcmeCa {
         match ca_type {
             CA_DEFAULT_LE => AcmeCa::LetsEncrypt(Box::new(LetsEncrypt)),
             "z" | "zero" => AcmeCa::ZeroSSL(Box::new(ZeroSSL)),
-            "g" | "google" => AcmeCa::GoogleTrust(Box::new(GoogleTrust)),
+            "g" | "gts" => AcmeCa::GoogleTrustServices(Box::new(GoogleTrustServices)),
             _ => AcmeCa::LetsEncrypt(Box::new(LetsEncrypt)),
         }
     }
@@ -460,13 +444,23 @@ impl AcmeCa {
         }
     }
     fn intermediate_crt_url(&self, is_ecc: bool) -> Option<String> {
-        self.ca().intermediate_crt_url(is_ecc).map(|s| s.to_string())
+        match self {
+            AcmeCa::LetsEncrypt(_) => Some(
+                if is_ecc {
+                    URL_LE_INTERMEDIATE_ECC
+                } else {
+                    URL_LE_INTERMEDIATE_RSA
+                }
+                .to_string(),
+            ),
+            _ => None,
+        }
     }
     fn ca(&self) -> &dyn CA {
         match self {
             AcmeCa::LetsEncrypt(ca) => ca.as_ref(),
             AcmeCa::ZeroSSL(ca) => ca.as_ref(),
-            AcmeCa::GoogleTrust(ca) => ca.as_ref(),
+            AcmeCa::GoogleTrustServices(ca) => ca.as_ref(),
         }
     }
 }
