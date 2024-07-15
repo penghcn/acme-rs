@@ -7,6 +7,7 @@ cd acme-rs/
 cargo run --  dns=ai8.rs,www.ai8.rs dir=/www/ai8.rs
 ```
 
+Successful Log.
 ```
 07/11 12:16:06.136 INFO  [main.rs:165] - Successfully.
 For Nginx configuration:
@@ -23,7 +24,7 @@ For Apache configuration:
 ```
 2) To use another CA like ZeroSSL, like this:
 ```
-cargo run --  dns=ai8.rs,www.ai8.rs dir=/www/ai8.rs ca=z email=a@a.rs alg=rsa4
+cargo run --  dns=ai8.rs,www.ai8.rs dir=/www/ai8.rs ca=z email=a@a.rs
 ```
 
 Google Trust Services. 
@@ -31,7 +32,7 @@ Google Trust Services.
 [Get Google Cloud EAB](./gcloud-eab.md) or [参考 Google Cloud 的 EAB 获取](./gcloud-eab-zh.md)
 
 ```
-cargo run --  dns=ai8.rs,www.ai8.rs dir=/www/ai8.rs ca=g email=a@a.rs eab_kid=... eab_key=...
+cargo run --  dns=ai8.rs,www.ai8.rs dir=/www/ai8.rs ca=g email=a@a.rs alg=rsa4 eab_kid=... eab_key=...
 ```
 
 3) For more parameter configurations, please refer to the following.
