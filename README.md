@@ -45,7 +45,7 @@ email   | -    | Register account email
 eab_kid | -    | `<eab_kid>`, for Google Trust Services
 eab_key | -    | `<eab_hmac_key>`, for Google Trust Services
 ssl_dir | -    | Path to copy the ssl certificate files to after issue/renew. Such as /www/ssl
-ca      | le   | Case-insensitive. The defalut is "le", which stands for Let's Encrypt. ZeroSSL can be abbreviated as "Z","z","zero". Google Trust Services as "g"
+ca      | le   | Case-insensitive. The defalut is "le", which stands for Let's Encrypt. ZeroSSL can be abbreviated as "Z","z","zero". Google Trust Services as "g","gts"
 alg     | ec3  | Case-insensitive. Algorithm abbreviation: ec2,ec3,rsa2,rsa4, which are secp256r1,secp384r1,rsa2048,rsa4096
 log     | info | Case-insensitive. Log level: info,debug,trace
 
