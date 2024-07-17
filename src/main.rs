@@ -44,7 +44,8 @@ const DOMAIN_CRT: &str = "sign.crt";
 const CHAINED_CRT: &str = "chained.crt";
 
 const CERT_BEGIN: &str = "-----BEGIN CERTIFICATE-----";
-const CERT_REGEX: &str = r"-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----";
+const CERT_REGEX: &str = r"(-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----)";
+const ISSUER_REGEX: &str = r"Issuer:.*CN=(.*)";
 
 const PUB_ECC_REGEX: &str = r"pub:\n\s+([0-9a-fA-F:]+(?:\n\s+[0-9a-fA-F:]+)*)";
 const PUB_RSA_REGEX: &str = r"modulus:[\s]+?00:([a-f0-9\:\s]+?)\npublicExponent: ([0-9]+)";
@@ -289,7 +290,6 @@ async fn acme_issue(cfg: &AcmeCfg) -> Result<(String, String, String), AcmeError
 
     info!("Step 4.3 Finalize domain with csr.");
     let fin_url = &order_res.finalize.unwrap();
-
     let (nonce, os_url, or) = _finalize_csr(fin_url, mut_nonce, &account_key_path, &alg, &kid, csr.clone()).await?;
     mut_nonce = nonce;
 
@@ -321,7 +321,7 @@ async fn acme_issue(cfg: &AcmeCfg) -> Result<(String, String, String), AcmeError
         None => return AcmeError::tip(TIP_DOWN_CRT_FAILED),
     };
     info!("Step 4.4 Download certificate file. Named {}", DOMAIN_CRT);
-    let domain_crt = _down_certificate(&cert_url, mut_nonce, &account_key_path, &alg, &kid).await?;
+    let domain_crt = _down_certificate(&cert_url, mut_nonce, &account_key_path, &alg, &kid, &cfg.preferred_chain).await?;
 
     // 5.1、最后，合并sign.crt和intermediate.pem的内容成 chained.pem
     let domain_crt_path = format!("{}/{}", cfg.acme_dir, DOMAIN_CRT);
@@ -332,9 +332,9 @@ async fn acme_issue(cfg: &AcmeCfg) -> Result<(String, String, String), AcmeError
         Some(_url) => {
             info!("Download ca intermediate file. Named intermediate.pem");
             let _intermediate_pem = _http_json(&_url, None, Method::GET).await?.1;
-            (domain_crt.as_str(), &format!("{0}\n{1}", domain_crt, _intermediate_pem))
+            (&domain_crt, &format!("{0}\n{1}", &domain_crt, _intermediate_pem))
         }
-        None => (_split_cert_chained(&domain_crt)?, &domain_crt),
+        None => (&_split_cert_chained(&domain_crt)?, &domain_crt),
     };
     let _ = _write_to_file(&domain_crt_path, &domain_pem)?;
     let _ = _write_to_file(&chained_pem_path, &chained_pem)?;
@@ -443,6 +443,12 @@ impl AcmeCa {
             _ => None,
         }
     }
+    fn preferred_chain(&self, is_ecc: bool) -> Option<String> {
+        match self {
+            AcmeCa::LetsEncrypt(_) => Some(format!("ISRG Root X{}", if is_ecc { "2" } else { "1" })),
+            _ => None,
+        }
+    }
     fn intermediate_crt_url(&self, is_ecc: bool) -> Option<String> {
         match self {
             AcmeCa::LetsEncrypt(_) => Some(
@@ -504,6 +510,7 @@ struct AcmeCfg {
     acme_dir: String,    //acme运行的目录，如 /www/ai8.rs/.acme
     acme_ca_dir: String, //acme运行的ca相关，如一些缓存，如 /www/ai8.rs/.acme/letsencrypt/v02
     ca: AcmeCa,
+    preferred_chain: Option<String>,
     domain_alg: Alg,
     log_level: LevelFilter,
     eab: Eab,
@@ -549,6 +556,11 @@ impl AcmeCfg {
             fs::create_dir_all(_path)?; // 递归创建目录
         }
 
+        let preferred_chain = map
+            .get("preferred_chain")
+            .map(|s| s.to_string())
+            .or(ca.preferred_chain(domain_alg.is_ecc()));
+
         let log_level = match map.get("log") {
             Some(level) => match level.to_lowercase().as_str() {
                 "debug" => LevelFilter::Debug,
@@ -570,6 +582,7 @@ impl AcmeCfg {
             acme_dir,
             acme_ca_dir,
             ca,
+            preferred_chain,
             domain_alg,
             log_level,
             eab,
@@ -763,15 +776,15 @@ impl Jwk {
     fn call(out: &str, is_ecc: bool) -> Result<Self, AcmeError> {
         //let is_ecc= out.starts_with("Private-Key:");
         if is_ecc {
-            let pub_ = _regx(&out, PUB_ECC_REGEX, true);
-            let crv = _regx(&out, r"NIST CURVE: (.*)", false);
+            let pub_ = _regx(&out, PUB_ECC_REGEX, true)?;
+            let crv = _regx(&out, r"NIST CURVE: (.*)", false)?;
 
             let offset = pub_.len() / 2 + 1;
             let (x, y) = (_base64_hex(&pub_[2..offset]), _base64_hex(&pub_[offset..]));
             Ok(Self::_Ecc(JwkEcc::new(crv, x, y)))
         } else {
-            let pub_ = _regx(&out, PUB_RSA_REGEX, true);
-            let e = _regx(&out, r"0x([A-Fa-f0-9]+)", false);
+            let pub_ = _regx(&out, PUB_RSA_REGEX, true)?;
+            let e = _regx(&out, r"0x([A-Fa-f0-9]+)", false)?;
             let e = if e.len() % 2 == 0 { e } else { format!("0{}", e) };
             println!("{}: {}", &e, &pub_);
 
@@ -1234,12 +1247,36 @@ async fn _order_status(
     Ok((nonce, or_))
 }
 
-async fn _down_certificate(url: &str, nonce: String, file_path: &str, alg: &str, kid: &str) -> Result<String, AcmeError> {
+async fn _down_certificate(
+    url: &str,
+    nonce: String,
+    file_path: &str,
+    alg: &str,
+    kid: &str,
+    preferred_chain: &Option<String>,
+) -> Result<String, AcmeError> {
     let res = _post_kid(&url, nonce, file_path, alg, kid, None).await?;
     if res.2 != 200 {
         return AcmeError::tip(TIP_DOWN_CRT_FAILED);
     }
-    Ok(res.1)
+    let nonce = _get_header(HEADER_REPLAY_NONCE, &res.0);
+    let cert = res.1;
+
+    if let Some(preferred_chain) = preferred_chain {
+        if preferred_chain == &_issuer_cmd_openssl(&cert)? {
+            return Ok(cert);
+        }
+
+        let url = format!("{}/1", url);
+        let res = _post_kid(&url, nonce, file_path, alg, kid, None).await?;
+        if res.2 != 200 {
+            //return AcmeError::tip(TIP_DOWN_CRT_FAILED);
+            return Ok(cert);
+        }
+        Ok(res.1)
+    } else {
+        return Ok(cert);
+    }
 }
 
 fn _base64_hmac256(key: &str, s: &str) -> String {
@@ -1328,20 +1365,12 @@ fn _write_to_file(file_path: &str, s: &str) -> Result<(), AcmeError> {
 }
 
 // 分隔，第一个是domain.crt
-fn _split_cert_chained(crt_str: &str) -> Result<&str, AcmeError> {
+fn _split_cert_chained(crt_str: &str) -> Result<String, AcmeError> {
     if crt_str.matches(CERT_BEGIN).count() == 1 {
         warn!("Not full chained crt");
-        return Ok(crt_str);
+        return Ok(crt_str.to_string());
     }
-    let cert_regex = Regex::new(CERT_REGEX)?;
-
-    if let Some(cap) = cert_regex.captures(&crt_str) {
-        let first_cert = cap.get(0).map_or("", |m| m.as_str());
-        debug!("Split domain cert by chained\n{}", &first_cert);
-        Ok(first_cert)
-    } else {
-        return AcmeError::tip(TIP_REGEX_FAILED);
-    }
+    Ok(_regx(crt_str, CERT_REGEX, false)?)
 }
 
 fn _print_key_by_cmd_openssl(account_key_path: &str, is_ecc: bool) -> Result<Jwk, AcmeError> {
@@ -1391,7 +1420,7 @@ fn _sign_by_cmd_openssl(account_key_path: &str, plain: &str, is_ecc: bool, alg_l
         let out = String::from_utf8(out.stdout).unwrap();
         trace!("sign ecc out:\n{}", &out);
 
-        Ok(_base64_hex(&_asn1_parse(&out)))
+        Ok(_base64_hex(&_asn1_parse(&out)?))
     } else {
         let out = _base64(&out.stdout);
         trace!("sign rsa out: {}", &out);
@@ -1399,32 +1428,336 @@ fn _sign_by_cmd_openssl(account_key_path: &str, plain: &str, is_ecc: bool, alg_l
     }
 }
 
+// openssl crl2pkcs7 -nocrl -certfile ca.crt | openssl pkcs7 -print_certs -text -noout
+// openssl crl2pkcs7 -nocrl -certfile ca.crt > ca.pk7
+// openssl pkcs7 -print_certs -in ca.pk7 -text -noout
+fn _issuer_cmd_openssl(cert: &str) -> Result<String, AcmeError> {
+    let cert = _regx2(&cert, CERT_REGEX)?;
+    //trace!("show out:{}", &cert);
+
+    let mut child = Command::new("openssl")
+        .args(&["x509", "-text", "-noout"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped()) // 捕获输出
+        .spawn()?;
+
+    {
+        let stdin = child.stdin.as_mut().expect("Failed to open stdin");
+        stdin.write_all(&cert.as_bytes())?
+    }
+    let out = child.wait_with_output()?;
+    let out = String::from_utf8(out.stdout).unwrap();
+    trace!("show cert:\n{}", &out);
+
+    let out = _regx(&out, ISSUER_REGEX, false)?.to_uppercase();
+    debug!("issuer: {}", &out);
+
+    Ok(out)
+}
+
+#[test]
+fn t() {
+    log::set_boxed_logger(Box::new(AcmeLogger)).unwrap();
+    log::set_max_level(LevelFilter::Trace);
+    //Issuer: C=US, O=Internet Security Research Group, CN=ISRG Root X1
+    println!(
+        "{},{}",
+        _regx(a1, ISSUER_REGEX, false).unwrap(),
+        _regx2(a1, ISSUER_REGEX).unwrap()
+    );
+
+    let _ = _issuer_cmd_openssl(cert1);
+    //let _ = _split_cert_chained(cert1);
+    //println!("{}",  _regx(cert1, CERT_REGEX,false).unwrap());
+}
+
+const cert1: &str = r#"-----BEGIN CERTIFICATE-----
+MIIDnTCCAyOgAwIBAgISBASfI38kM8K1e+1F4WNdW3b3MAoGCCqGSM49BAMDMDIx
+CzAJBgNVBAYTAlVTMRYwFAYDVQQKEw1MZXQncyBFbmNyeXB0MQswCQYDVQQDEwJF
+NTAeFw0yNDA3MTYwODM5MTRaFw0yNDEwMTQwODM5MTNaMBMxETAPBgNVBAMTCHBl
+bmdoLmNuMHYwEAYHKoZIzj0CAQYFK4EEACIDYgAEvJBpo4dGPpc71mh/54sLX2sd
+jlApcDyeJpfW9uqab51LCeF253OF4IiuLPg5qL4mariBbu72mv2r2wUgBuctJGpE
+EqnxEDFQlnBq+ohvlFBB1AVictwr4EO9uEUEsUJho4ICGTCCAhUwDgYDVR0PAQH/
+BAQDAgeAMB0GA1UdJQQWMBQGCCsGAQUFBwMBBggrBgEFBQcDAjAMBgNVHRMBAf8E
+AjAAMB0GA1UdDgQWBBRtT7NUiAaPmAW6u6IKvqp6ZJzJSTAfBgNVHSMEGDAWgBSf
+K1/PPCFPnQS37SssxMZwi9LXDTBVBggrBgEFBQcBAQRJMEcwIQYIKwYBBQUHMAGG
+FWh0dHA6Ly9lNS5vLmxlbmNyLm9yZzAiBggrBgEFBQcwAoYWaHR0cDovL2U1Lmku
+bGVuY3Iub3JnLzAhBgNVHREEGjAYgghwZW5naC5jboIMd3d3LnBlbmdoLmNuMBMG
+A1UdIAQMMAowCAYGZ4EMAQIBMIIBBQYKKwYBBAHWeQIEAgSB9gSB8wDxAHYA7s3Q
+ZNXbGs7FXLedtM0TojKHRny87N7DUUhZRnEftZsAAAGQuukQCQAABAMARzBFAiEA
+xbVsEG0ZbmWcyMBD3LhywBiABf9WrJY4UHJf9XGKIi4CIFaKbxnwvuJHm+c4JctN
+vpVcbH7k2keEg2+KcjTKAfRlAHcASLDja9qmRzQP5WoC+p0w6xxSActW3SyB2bu/
+qznYhHMAAAGQuukQCAAABAMASDBGAiEAkTVliW2af4Fyk3DAiWMyGhdldN6zcW8F
+wyeUxiddUkECIQDqG/nYC+k15MtKGwPcTi/Yy/HmKZV7Fmpj51BeJ86ZVTAKBggq
+hkjOPQQDAwNoADBlAjEAup+3OPPzgAvyZtDQgjqjvhbzqAmX0EuNdKVPK87hswKY
+C3eLc6tJm+ye29XqiYCDAjBWmSPsbLw60HV+p5pMjVCJz+ha4rtQVPSa9JysbYYw
+j45Nz0qN45ywzrs3kjhX2Uo=
+-----END CERTIFICATE-----
+
+-----BEGIN CERTIFICATE-----
+MIIEVzCCAj+gAwIBAgIRAIOPbGPOsTmMYgZigxXJ/d4wDQYJKoZIhvcNAQELBQAw
+TzELMAkGA1UEBhMCVVMxKTAnBgNVBAoTIEludGVybmV0IFNlY3VyaXR5IFJlc2Vh
+cmNoIEdyb3VwMRUwEwYDVQQDEwxJU1JHIFJvb3QgWDEwHhcNMjQwMzEzMDAwMDAw
+WhcNMjcwMzEyMjM1OTU5WjAyMQswCQYDVQQGEwJVUzEWMBQGA1UEChMNTGV0J3Mg
+RW5jcnlwdDELMAkGA1UEAxMCRTUwdjAQBgcqhkjOPQIBBgUrgQQAIgNiAAQNCzqK
+a2GOtu/cX1jnxkJFVKtj9mZhSAouWXW0gQI3ULc/FnncmOyhKJdyIBwsz9V8UiBO
+VHhbhBRrwJCuhezAUUE8Wod/Bk3U/mDR+mwt4X2VEIiiCFQPmRpM5uoKrNijgfgw
+gfUwDgYDVR0PAQH/BAQDAgGGMB0GA1UdJQQWMBQGCCsGAQUFBwMCBggrBgEFBQcD
+ATASBgNVHRMBAf8ECDAGAQH/AgEAMB0GA1UdDgQWBBSfK1/PPCFPnQS37SssxMZw
+i9LXDTAfBgNVHSMEGDAWgBR5tFnme7bl5AFzgAiIyBpY9umbbjAyBggrBgEFBQcB
+AQQmMCQwIgYIKwYBBQUHMAKGFmh0dHA6Ly94MS5pLmxlbmNyLm9yZy8wEwYDVR0g
+BAwwCjAIBgZngQwBAgEwJwYDVR0fBCAwHjAcoBqgGIYWaHR0cDovL3gxLmMubGVu
+Y3Iub3JnLzANBgkqhkiG9w0BAQsFAAOCAgEAH3KdNEVCQdqk0LKyuNImTKdRJY1C
+2uw2SJajuhqkyGPY8C+zzsufZ+mgnhnq1A2KVQOSykOEnUbx1cy637rBAihx97r+
+bcwbZM6sTDIaEriR/PLk6LKs9Be0uoVxgOKDcpG9svD33J+G9Lcfv1K9luDmSTgG
+6XNFIN5vfI5gs/lMPyojEMdIzK9blcl2/1vKxO8WGCcjvsQ1nJ/Pwt8LQZBfOFyV
+XP8ubAp/au3dc4EKWG9MO5zcx1qT9+NXRGdVWxGvmBFRAajciMfXME1ZuGmk3/GO
+koAM7ZkjZmleyokP1LGzmfJcUd9s7eeu1/9/eg5XlXd/55GtYjAM+C4DG5i7eaNq
+cm2F+yxYIPt6cbbtYVNJCGfHWqHEQ4FYStUyFnv8sjyqU8ypgZaNJ9aVcWSICLOI
+E1/Qv/7oKsnZCWJ926wU6RqG1OYPGOi1zuABhLw61cuPVDT28nQS/e6z95cJXq0e
+K1BcaJ6fJZsmbjRgD5p3mvEf5vdQM7MCEvU0tHbsx2I5mHHJoABHb8KVBgWp/lcX
+GWiWaeOyB7RP+OfDtvi2OsapxXiV7vNVs7fMlrRjY1joKaqmmycnBvAq14AEbtyL
+sVfOS66B8apkeFX2NY4XPEYV4ZSCe8VHPrdrERk2wILG3T/EGmSIkCYVUMSnjmJd
+VQD9F6Na/+zmXCc=
+-----END CERTIFICATE-----"#;
+const cert7: &str = r#"-----BEGIN PKCS7-----
+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
+P8QaZIiQJhVQxKeOYl1VAP0Xo1r/7OZcJzEA
+-----END PKCS7-----"#;
+
+const a1: &str = r#"Certificate:
+    Data:
+        Version: 3 (0x2)
+        Serial Number:
+            04:04:9f:23:7f:24:33:c2:b5:7b:ed:45:e1:63:5d:5b:76:f7
+        Signature Algorithm: ecdsa-with-SHA384
+        Issuer: C=US, O=Let's Encrypt, CN=E5
+        Validity
+            Not Before: Jul 16 08:39:14 2024 GMT
+            Not After : Oct 14 08:39:13 2024 GMT
+        Subject: CN=pengh.cn
+        Subject Public Key Info:
+            Public Key Algorithm: id-ecPublicKey
+                Public-Key: (384 bit)
+                pub:
+                    04:bc:90:69:a3:87:46:3e:97:3b:d6:68:7f:e7:8b:
+                    0b:5f:6b:1d:8e:50:29:70:3c:9e:26:97:d6:f6:ea:
+                    9a:6f:9d:4b:09:e1:76:e7:73:85:e0:88:ae:2c:f8:
+                    39:a8:be:26:6a:b8:81:6e:ee:f6:9a:fd:ab:db:05:
+                    20:06:e7:2d:24:6a:44:12:a9:f1:10:31:50:96:70:
+                    6a:fa:88:6f:94:50:41:d4:05:62:72:dc:2b:e0:43:
+                    bd:b8:45:04:b1:42:61
+                ASN1 OID: secp384r1
+                NIST CURVE: P-384
+        X509v3 extensions:
+            X509v3 Key Usage: critical
+                Digital Signature
+            X509v3 Extended Key Usage: 
+                TLS Web Server Authentication, TLS Web Client Authentication
+            X509v3 Basic Constraints: critical
+                CA:FALSE
+            X509v3 Subject Key Identifier: 
+                6D:4F:B3:54:88:06:8F:98:05:BA:BB:A2:0A:BE:AA:7A:64:9C:C9:49
+            X509v3 Authority Key Identifier: 
+                9F:2B:5F:CF:3C:21:4F:9D:04:B7:ED:2B:2C:C4:C6:70:8B:D2:D7:0D
+            Authority Information Access: 
+                OCSP - URI:http://e5.o.lencr.org
+                CA Issuers - URI:http://e5.i.lencr.org/
+            X509v3 Subject Alternative Name: 
+                DNS:pengh.cn, DNS:www.pengh.cn
+            X509v3 Certificate Policies: 
+                Policy: 2.23.140.1.2.1
+            CT Precertificate SCTs: 
+                Signed Certificate Timestamp:
+                    Version   : v1 (0x0)
+                    Log ID    : EE:CD:D0:64:D5:DB:1A:CE:C5:5C:B7:9D:B4:CD:13:A2:
+                                32:87:46:7C:BC:EC:DE:C3:51:48:59:46:71:1F:B5:9B
+                    Timestamp : Jul 16 09:39:14.569 2024 GMT
+                    Extensions: none
+                    Signature : ecdsa-with-SHA256
+                                30:45:02:21:00:C5:B5:6C:10:6D:19:6E:65:9C:C8:C0:
+                                43:DC:B8:72:C0:18:80:05:FF:56:AC:96:38:50:72:5F:
+                                F5:71:8A:22:2E:02:20:56:8A:6F:19:F0:BE:E2:47:9B:
+                                E7:38:25:CB:4D:BE:95:5C:6C:7E:E4:DA:47:84:83:6F:
+                                8A:72:34:CA:01:F4:65
+                Signed Certificate Timestamp:
+                    Version   : v1 (0x0)
+                    Log ID    : 48:B0:E3:6B:DA:A6:47:34:0F:E5:6A:02:FA:9D:30:EB:
+                                1C:52:01:CB:56:DD:2C:81:D9:BB:BF:AB:39:D8:84:73
+                    Timestamp : Jul 16 09:39:14.568 2024 GMT
+                    Extensions: none
+                    Signature : ecdsa-with-SHA256
+                                30:46:02:21:00:91:35:65:89:6D:9A:7F:81:72:93:70:
+                                C0:89:63:32:1A:17:65:74:DE:B3:71:6F:05:C3:27:94:
+                                C6:27:5D:52:41:02:21:00:EA:1B:F9:D8:0B:E9:35:E4:
+                                CB:4A:1B:03:DC:4E:2F:D8:CB:F1:E6:29:95:7B:16:6A:
+                                63:E7:50:5E:27:CE:99:55
+    Signature Algorithm: ecdsa-with-SHA384
+    Signature Value:
+        30:65:02:31:00:ba:9f:b7:38:f3:f3:80:0b:f2:66:d0:d0:82:
+        3a:a3:be:16:f3:a8:09:97:d0:4b:8d:74:a5:4f:2b:ce:e1:b3:
+        02:98:0b:77:8b:73:ab:49:9b:ec:9e:db:d5:ea:89:80:83:02:
+        30:56:99:23:ec:6c:bc:3a:d0:75:7e:a7:9a:4c:8d:50:89:cf:
+        e8:5a:e2:bb:50:54:f4:9a:f4:9c:ac:6d:86:30:8f:8e:4d:cf:
+        4a:8d:e3:9c:b0:ce:bb:37:92:38:57:d9:4a
+
+Certificate:
+    Data:
+        Version: 3 (0x2)
+        Serial Number:
+            83:8f:6c:63:ce:b1:39:8c:62:06:62:83:15:c9:fd:de
+        Signature Algorithm: sha256WithRSAEncryption
+        Issuer: C=US, O=Internet Security Research Group, CN=ISRG Root X1
+        Validity
+            Not Before: Mar 13 00:00:00 2024 GMT
+            Not After : Mar 12 23:59:59 2027 GMT
+        Subject: C=US, O=Let's Encrypt, CN=E5
+        Subject Public Key Info:
+            Public Key Algorithm: id-ecPublicKey
+                Public-Key: (384 bit)
+                pub:
+                    04:0d:0b:3a:8a:6b:61:8e:b6:ef:dc:5f:58:e7:c6:
+                    42:45:54:ab:63:f6:66:61:48:0a:2e:59:75:b4:81:
+                    02:37:50:b7:3f:16:79:dc:98:ec:a1:28:97:72:20:
+                    1c:2c:cf:d5:7c:52:20:4e:54:78:5b:84:14:6b:c0:
+                    90:ae:85:ec:c0:51:41:3c:5a:87:7f:06:4d:d4:fe:
+                    60:d1:fa:6c:2d:e1:7d:95:10:88:a2:08:54:0f:99:
+                    1a:4c:e6:ea:0a:ac:d8
+                ASN1 OID: secp384r1
+                NIST CURVE: P-384
+        X509v3 extensions:
+            X509v3 Key Usage: critical
+                Digital Signature, Certificate Sign, CRL Sign
+            X509v3 Extended Key Usage: 
+                TLS Web Client Authentication, TLS Web Server Authentication
+            X509v3 Basic Constraints: critical
+                CA:TRUE, pathlen:0
+            X509v3 Subject Key Identifier: 
+                9F:2B:5F:CF:3C:21:4F:9D:04:B7:ED:2B:2C:C4:C6:70:8B:D2:D7:0D
+            X509v3 Authority Key Identifier: 
+                79:B4:59:E6:7B:B6:E5:E4:01:73:80:08:88:C8:1A:58:F6:E9:9B:6E
+            Authority Information Access: 
+                CA Issuers - URI:http://x1.i.lencr.org/
+            X509v3 Certificate Policies: 
+                Policy: 2.23.140.1.2.1
+            X509v3 CRL Distribution Points: 
+                Full Name:
+                  URI:http://x1.c.lencr.org/
+    Signature Algorithm: sha256WithRSAEncryption
+    Signature Value:
+        1f:72:9d:34:45:42:41:da:a4:d0:b2:b2:b8:d2:26:4c:a7:51:
+        25:8d:42:da:ec:36:48:96:a3:ba:1a:a4:c8:63:d8:f0:2f:b3:
+        ce:cb:9f:67:e9:a0:9e:19:ea:d4:0d:8a:55:03:92:ca:43:84:
+        9d:46:f1:d5:cc:ba:df:ba:c1:02:28:71:f7:ba:fe:6d:cc:1b:
+        64:ce:ac:4c:32:1a:12:b8:91:fc:f2:e4:e8:b2:ac:f4:17:b4:
+        ba:85:71:80:e2:83:72:91:bd:b2:f0:f7:dc:9f:86:f4:b7:1f:
+        bf:52:bd:96:e0:e6:49:38:06:e9:73:45:20:de:6f:7c:8e:60:
+        b3:f9:4c:3f:2a:23:10:c7:48:cc:af:5b:95:c9:76:ff:5b:ca:
+        c4:ef:16:18:27:23:be:c4:35:9c:9f:cf:c2:df:0b:41:90:5f:
+        38:5c:95:5c:ff:2e:6c:0a:7f:6a:ed:dd:73:81:0a:58:6f:4c:
+        3b:9c:dc:c7:5a:93:f7:e3:57:44:67:55:5b:11:af:98:11:51:
+        01:a8:dc:88:c7:d7:30:4d:59:b8:69:a4:df:f1:8e:92:80:0c:
+        ed:99:23:66:69:5e:ca:89:0f:d4:b1:b3:99:f2:5c:51:df:6c:
+        ed:e7:ae:d7:ff:7f:7a:0e:57:95:77:7f:e7:91:ad:62:30:0c:
+        f8:2e:03:1b:98:bb:79:a3:6a:72:6d:85:fb:2c:58:20:fb:7a:
+        71:b6:ed:61:53:49:08:67:c7:5a:a1:c4:43:81:58:4a:d5:32:
+        16:7b:fc:b2:3c:aa:53:cc:a9:81:96:8d:27:d6:95:71:64:88:
+        08:b3:88:13:5f:d0:bf:fe:e8:2a:c9:d9:09:62:7d:db:ac:14:
+        e9:1a:86:d4:e6:0f:18:e8:b5:ce:e0:01:84:bc:3a:d5:cb:8f:
+        54:34:f6:f2:74:12:fd:ee:b3:f7:97:09:5e:ad:1e:2b:50:5c:
+        68:9e:9f:25:9b:26:6e:34:60:0f:9a:77:9a:f1:1f:e6:f7:50:
+        33:b3:02:12:f5:34:b4:76:ec:c7:62:39:98:71:c9:a0:00:47:
+        6f:c2:95:06:05:a9:fe:57:17:19:68:96:69:e3:b2:07:b4:4f:
+        f8:e7:c3:b6:f8:b6:3a:c6:a9:c5:78:95:ee:f3:55:b3:b7:cc:
+        96:b4:63:63:58:e8:29:aa:a6:9b:27:27:06:f0:2a:d7:80:04:
+        6e:dc:8b:b1:57:ce:4b:ae:81:f1:aa:64:78:55:f6:35:8e:17:
+        3c:46:15:e1:94:82:7b:c5:47:3e:b7:6b:11:19:36:c0:82:c6:
+        dd:3f:c4:1a:64:88:90:26:15:50:c4:a7:8e:62:5d:55:00:fd:
+        17:a3:5a:ff:ec:e6:5c:27"#;
+
 /*
     0:d=0  hl=2 l=  70 cons: SEQUENCE
     2:d=1  hl=2 l=  33 prim: INTEGER           :9A610C19E73BE8EC7E9BDD8E87B8263BFEA000AA37CFB30A893CD8BC2CA0A3F7
    37:d=1  hl=2 l=  33 prim: INTEGER           :CE3F47012A7EB61095338B38D95B18E7CDB2EEFFA2BA26E83B226B9C58370A21
 */
-fn _asn1_parse(text: &str) -> String {
-    let re = Regex::new(r"prim: INTEGER\s*:\s*(\w+)").unwrap();
-    let ec_r = re.captures(text).unwrap().get(1).map_or("", |m| m.as_str());
-    let ec_s = re
+fn _asn1_parse(text: &str) -> Result<String, AcmeError> {
+    let re = r"prim: INTEGER\s*:\s*(\w+)";
+    //let re = Regex::new(r"prim: INTEGER\s*:\s*(\w+)").unwrap();
+    // let ec_r = re.captures(text).unwrap().get(1).map_or("", |m| m.as_str());
+    // let ec_s = re
+    //     .captures_iter(text)
+    //     .nth(1)
+    //     .and_then(|cap| cap.get(1))
+    //     .map_or("", |m| m.as_str());
+    let (ec_r, ec_s) = (_regx(text, re, false)?, _regx2(text, re)?);
+
+    trace!("ec_r: {}\nec_s: {}", ec_r, ec_s);
+
+    Ok(format!("{}{}", ec_r, ec_s))
+}
+
+fn _regx2(text: &str, reg: &str) -> Result<String, AcmeError> {
+    let non_greedy_re = Regex::new(reg)?;
+    let p = non_greedy_re
         .captures_iter(text)
         .nth(1)
         .and_then(|cap| cap.get(1))
         .map_or("", |m| m.as_str());
-
-    trace!("ec_r: {}\nec_s: {}", ec_r, ec_s);
-
-    format!("{}{}", ec_r, ec_s)
+    Ok(p.to_string())
 }
-
-fn _regx(out: &str, reg: &str, need_rep: bool) -> String {
-    let non_greedy_re = Regex::new(reg).unwrap();
-    let p = non_greedy_re.captures(&out).unwrap().get(1).map_or("", |m| m.as_str());
-    if need_rep {
-        return p.replace(":", "").replace("\n", "").replace(" ", "");
+fn _regx(text: &str, reg: &str, need_rep: bool) -> Result<String, AcmeError> {
+    let non_greedy_re = Regex::new(reg)?;
+    if let Some(cap) = non_greedy_re.captures(&text) {
+        let p = cap.get(1).map_or("", |m| m.as_str());
+        if need_rep {
+            return Ok(p.replace(":", "").replace("\n", "").replace(" ", ""));
+        }
+        Ok(p.to_string())
+    } else {
+        return AcmeError::tip(TIP_REGEX_FAILED);
     }
-    p.to_string()
 }
 
 fn _read_cache(_cache_path: &str) -> Option<String> {
