@@ -336,8 +336,8 @@ async fn acme_issue(cfg: &AcmeCfg) -> Result<(String, String, String), AcmeError
         }
         None => (&_split_cert_chained(&domain_crt)?, &domain_crt),
     };
-    let _ = _write_to_file(&domain_crt_path, &domain_pem.as_bytes())?;
-    let _ = _write_to_file(&chained_pem_path, &chained_pem.as_bytes())?;
+    let _ = _write_file(&domain_crt_path, &domain_pem.as_bytes())?;
+    let _ = _write_file(&chained_pem_path, &chained_pem.as_bytes())?;
 
     // 5.2、复制小文件到备份目录
     let bk_no = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
@@ -1091,7 +1091,7 @@ async fn _eab_by_email(url: &str, email: &str, acme_ca_dir: &str) -> Result<Opti
     } else {
         let url = format!("{}?email={}", url, email);
         let res = _http_json(&url, None, Method::POST).await?.1;
-        let _ = _write_to_file(&_cache_path, &res.as_bytes())?;
+        let _ = _write_file(&_cache_path, &res.as_bytes())?;
         res
     };
 
@@ -1159,7 +1159,7 @@ async fn _new_acct(
         _get_header(HEADER_LOCATION, &headers),
     );
 
-    let _ = _write_to_file(&_cache_path, &kid.as_bytes())?;
+    let _ = _write_file(&_cache_path, &kid.as_bytes())?;
 
     Ok((nonce, kid))
 }
@@ -1196,7 +1196,7 @@ async fn _write_to_challenges(token: String, domain: &str, acme_dir: &str, thumb
     let token = token.replace(r"[^A-Za-z0-9_\-]", "_");
     let key_authorization = format!("{0}.{1}", token, thumbprint);
     let well_known_path = format!("{}{}{}", acme_dir, DIR_CHALLENGES, token);
-    let _ = _write_to_file(&well_known_path, &key_authorization.as_bytes())?;
+    let _ = _write_file(&well_known_path, &key_authorization.as_bytes())?;
     let wellknown_url = format!("http://{0}/.well-known/acme-challenge/{1}", domain, token);
     let ka = _http_json(&wellknown_url, None, Method::GET).await?.1; // 自己先验一下
     if ka != key_authorization {
@@ -1324,7 +1324,7 @@ fn _gen_key_by_cmd_openssl(key_path: &str, alg: &Alg) -> Result<Output, AcmeErro
     };
 
     let out = Command::new("openssl").args(a).output()?;
-    _write_to_file(key_path, &out.stdout)?;
+    _write_file(key_path, &out.stdout)?;
     Ok(out)
 }
 
@@ -1341,10 +1341,8 @@ fn _gen_csr_by_cmd_openssl(acme_dir: &str, domain_key_alg: &Alg, dns: &Vec<Strin
 
     let openssl_cnf = fs::read_to_string("/etc/ssl/openssl.cnf")?;
     let dns_san = dns.iter().map(|_d| format!("DNS:{}", _d)).collect::<Vec<String>>().join(",");
-    let _ = _write_to_file(
-        &tmp,
-        &format!("{}\n[SAN]\nsubjectAltName={}", openssl_cnf, dns_san).as_bytes(),
-    )?;
+    let dns_san = format!("{}\n[SAN]\nsubjectAltName={}", openssl_cnf, dns_san);
+    let _ = _write_file(&tmp, &dns_san.as_bytes())?;
 
     let a =
         ["req", "-new", "-key", &domain_key_path, "-subj", "/", "-reqexts", "SAN", "-config", &tmp, "-out", &domain_csr_path];
@@ -1360,7 +1358,7 @@ fn _gen_csr_by_cmd_openssl(acme_dir: &str, domain_key_alg: &Alg, dns: &Vec<Strin
 }
 
 // 覆盖写入
-fn _write_to_file(file_path: &str, s: &[u8]) -> Result<(), AcmeError> {
+fn _write_file(file_path: &str, s: &[u8]) -> Result<(), AcmeError> {
     let _ = File::create(&file_path)
         .map_err(|_e| AcmeError::Tip(format!("Create file failed: {}. {}", file_path, _e.to_string())))?
         .write(s)
