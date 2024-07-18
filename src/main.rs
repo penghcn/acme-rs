@@ -15,9 +15,9 @@ use std::{
 };
 use tokio::time::sleep_until;
 
-const URL_LE: &str = "https://acme-v02.api.letsencrypt.org/directory";
-const URL_LE_INTERMEDIATE_RSA: &str = "https://letsencrypt.org/certs/2024/r11.pem"; // https://letsencrypt.org/zh-cn/certificates/
-const URL_LE_INTERMEDIATE_ECC: &str = "https://letsencrypt.org/certs/2024/e6.pem";
+const URL_LE: &str = "https://acme-v02.api.letsencrypt.org/directory"; //test https://acme-staging-v02.api.letsencrypt.org/directory
+const URL_LE_INTERMEDIATE_RSA: &str = "https://letsencrypt.org/certs/2024/r10.pem"; // https://letsencrypt.org/zh-cn/certificates/
+const URL_LE_INTERMEDIATE_ECC: &str = "https://letsencrypt.org/certs/2024/e5.pem";
 
 const URL_ZERO: &str = "https://acme.zerossl.com/v2/DV90";
 const URL_ZERO_EAB: &str = "https://api.zerossl.com/acme/eab-credentials-email";
@@ -33,7 +33,7 @@ const DIR_CA_LE: &str = "/letsencrypt/v02";
 const DIR_CA_ZERO: &str = "/zerossl/v2/DV90";
 const DIR_CA_GOOGLE_TRUST: &str = "/goog/v02";
 
-const DIR_CHALLENGES: &str = "/challenges/";
+const DIR_CHALLENGE: &str = "/.well-known/acme-challenge/";
 const DIR_ACME: &str = "/.acme";
 const DIR_BACKUP: &str = "/.backup";
 const PATH_CACHE_KID: &str = "/.cache.kid";
@@ -45,7 +45,8 @@ const CHAINED_CRT: &str = "chained.crt";
 
 const CERT_BEGIN: &str = "-----BEGIN CERTIFICATE-----";
 const CERT_REGEX: &str = r"(-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----)";
-const ISSUER_REGEX: &str = r"Issuer:.*CN=(.*)";
+const ISSUER_REGEX: &str = r"Issuer:.*CN\s?=\s?(.*)";
+const LINK_ALT_REGEX: &str = "<(http.*)>;rel=\"alternate\"";
 
 const PUB_ECC_REGEX: &str = r"pub:\n\s+([0-9a-fA-F:]+(?:\n\s+[0-9a-fA-F:]+)*)";
 const PUB_RSA_REGEX: &str = r"modulus:[\s]+?00:([a-f0-9\:\s]+?)\npublicExponent: ([0-9]+)";
@@ -72,6 +73,7 @@ const TIMEOUT_SEC_10: Duration = Duration::from_secs(10); //10s
 
 const HEADER_REPLAY_NONCE: &str = "replay-nonce";
 const HEADER_LOCATION: &str = "location";
+const HEADER_LINK: &str = "link";
 const TYPE_HTTP: &str = "http-01";
 const STATUS_OK: &str = "valid"; //valid. pending, ready, processing. invalid
 const STATUS_PENDING: &str = "pending"; //valid. pending, ready, processing. invalid
@@ -171,7 +173,7 @@ async fn acme_issue3(cfg: &AcmeCfg) -> () {
                 return;
             }
         }
-        debug!("Loop {}/3, acme issue", i);
+        debug!("Loop {}/3, acme issue", i + 1);
         std::thread::sleep(SLEEP_DURATION_SEC_5);
     }
 }
@@ -192,19 +194,19 @@ async fn acme_issue(cfg: &AcmeCfg) -> Result<(String, String, String), AcmeError
 
     // 3.1 先获取或生成 account.key，默认ecc256
     let account_key_path = format!("{0}{1}", cfg.acme_ca_dir, PATH_ACCOUNT_KEY);
-    let acccount_alg = Alg::new(ACCOUNT_ALG_DEFAULT_EC2); //cfg.alg;
+    let account_alg = Alg::new(ACCOUNT_ALG_DEFAULT_EC2); //cfg.alg;
 
     if _read_cache(&account_key_path).is_none() {
-        let _ = _gen_key_by_cmd_openssl(&account_key_path, &acccount_alg);
+        let _ = _gen_key_by_cmd_openssl(&account_key_path, &account_alg);
         let kid_cache_path = format!("{0}{1}{2}", cfg.acme_ca_dir, PATH_CACHE_KID, &cfg.eab._kid());
         let kid_cache_path = Path::new(&kid_cache_path);
         if kid_cache_path.exists() {
             fs::remove_file(kid_cache_path)?; //同时删除cache.kid
         }
-        info!("Step 3.1 Gen account key by {:?}: {}", &acccount_alg, &account_key_path);
+        info!("Step 3.1 Gen account key by {:?}: {}", &account_alg, &account_key_path);
     }
 
-    let jwk = _print_key_by_cmd_openssl(&account_key_path, acccount_alg.is_ecc())?;
+    let jwk = _print_key_by_cmd_openssl(&account_key_path, account_alg.is_ecc())?;
     let alg = jwk.alg();
     let thumbprint = _base64_sha256(&jwk.to_string()?);
     debug!("\njwk: {:?}, thumbprint:{}", jwk, thumbprint);
@@ -328,7 +330,7 @@ async fn acme_issue(cfg: &AcmeCfg) -> Result<(String, String, String), AcmeError
     let chained_pem_path = format!("{}/{}", cfg.acme_dir, CHAINED_CRT);
     info!("Step 5.1 Wirte to {} and {}", DOMAIN_CRT, CHAINED_CRT);
 
-    let (domain_pem, chained_pem) = match cfg.ca.intermediate_crt_url(acccount_alg.is_ecc()) {
+    let (domain_pem, chained_pem) = match cfg.ca.intermediate_url(cfg.domain_alg.is_ecc()) {
         Some(_url) => {
             info!("Download ca intermediate file. Named intermediate.pem");
             let _intermediate_pem = _http_json(&_url, None, Method::GET).await?.1;
@@ -445,11 +447,11 @@ impl AcmeCa {
     }
     fn preferred_chain(&self, is_ecc: bool) -> Option<String> {
         match self {
-            AcmeCa::LetsEncrypt(_) => Some(format!("ISRG Root X{}", if is_ecc { "2" } else { "1" })),
+            AcmeCa::LetsEncrypt(_) => Some(format!("ISRG ROOT X{}", if is_ecc { "2" } else { "1" })),
             _ => None,
         }
     }
-    fn intermediate_crt_url(&self, is_ecc: bool) -> Option<String> {
+    fn intermediate_url(&self, is_ecc: bool) -> Option<String> {
         match self {
             AcmeCa::LetsEncrypt(_) => Some(
                 if is_ecc {
@@ -552,7 +554,7 @@ impl AcmeCfg {
         let acme_ca_dir = format!("{0}{1}", acme_dir, ca.ca_dir());
         let _path = Path::new(&acme_ca_dir);
         if !_path.exists() {
-            println!("Create path: {:?}", _path);
+            debug!("Create path: {:?}", _path);
             fs::create_dir_all(_path)?; // 递归创建目录
         }
 
@@ -777,14 +779,14 @@ impl Jwk {
         //let is_ecc= out.starts_with("Private-Key:");
         if is_ecc {
             let pub_ = _regx(&out, PUB_ECC_REGEX, true)?;
-            let crv = _regx(&out, r"NIST CURVE: (.*)", false)?;
+            let crv = _regx1(&out, r"NIST CURVE: (.*)")?;
 
             let offset = pub_.len() / 2 + 1;
             let (x, y) = (_base64_hex(&pub_[2..offset]), _base64_hex(&pub_[offset..]));
             Ok(Self::_Ecc(JwkEcc::new(crv, x, y)))
         } else {
             let pub_ = _regx(&out, PUB_RSA_REGEX, true)?;
-            let e = _regx(&out, r"0x([A-Fa-f0-9]+)", false)?;
+            let e = _regx1(&out, r"0x([A-Fa-f0-9]+)")?;
             let e = if e.len() % 2 == 0 { e } else { format!("0{}", e) };
             println!("{}: {}", &e, &pub_);
 
@@ -1068,12 +1070,21 @@ async fn _directory(url: String) -> Result<Directory, AcmeError> {
 }
 
 fn _get_header(key: &str, headers: &reqwest::header::HeaderMap) -> String {
+    match _get_headers(key, &headers).get(0) {
+        Some(first) => first.to_string(),
+        None => "".to_string(),
+    }
+}
+
+// 多key情况
+fn _get_headers(key: &str, headers: &reqwest::header::HeaderMap) -> Vec<String> {
+    let mut list: Vec<String> = Vec::new();
     for (k, v) in headers {
         if k.as_str() == key {
-            return v.to_str().unwrap().to_string();
+            list.push(v.to_str().unwrap().to_string());
         }
     }
-    "".to_string()
+    list
 }
 
 async fn _new_nonce(url: &str) -> Result<String, AcmeError> {
@@ -1195,9 +1206,15 @@ async fn _auth_domain(
 async fn _write_to_challenges(token: String, domain: &str, acme_dir: &str, thumbprint: &str) -> Result<String, AcmeError> {
     let token = token.replace(r"[^A-Za-z0-9_\-]", "_");
     let key_authorization = format!("{0}.{1}", token, thumbprint);
-    let well_known_path = format!("{}{}{}", acme_dir, DIR_CHALLENGES, token);
+    let well_known_path = format!("{}{}{}", acme_dir, DIR_CHALLENGE, token);
+    if let Some(_path) = Path::new(&well_known_path).parent() {
+        if !_path.exists() {
+            debug!("Create parent: {:?}", _path);
+            fs::create_dir_all(_path)?; // 递归创建目录
+        }
+    }
     let _ = _write_file(&well_known_path, &key_authorization.as_bytes())?;
-    let wellknown_url = format!("http://{0}/.well-known/acme-challenge/{1}", domain, token);
+    let wellknown_url = format!("http://{0}{1}{2}", domain, DIR_CHALLENGE, token);
     let ka = _http_json(&wellknown_url, None, Method::GET).await?.1; // 自己先验一下
     if ka != key_authorization {
         return AcmeError::tip(&format!("Check failed: {}", wellknown_url));
@@ -1267,7 +1284,25 @@ async fn _down_certificate(
             return Ok(cert);
         }
 
-        let url = format!("{}/1", url);
+        debug!("Considered preferred chain:{}", preferred_chain);
+        // let mut a: Option<String>= None;
+        // for s in _get_headers(HEADER_LINK, &res.0) {
+        // 	  match _regx1(&s, LINK_ALT_REGEX) {
+        // 		Ok(url) => a= Some(url),
+        // 		Err(_) => continue,
+        // 	};
+        // };
+        let url = _get_headers(HEADER_LINK, &res.0)
+            .iter()
+            .map(|s| _regx1(&s, LINK_ALT_REGEX))
+            .find_map(|s| s.ok());
+
+        let url = match url {
+            Some(url) => url,
+            None => return Ok(cert),
+        };
+
+        //let url = format!("{}/1", url);
         let res = _post_kid(&url, nonce, file_path, alg, kid, None).await?;
         if res.2 != 200 {
             //return AcmeError::tip(TIP_DOWN_CRT_FAILED);
@@ -1373,7 +1408,7 @@ fn _split_cert_chained(crt_str: &str) -> Result<String, AcmeError> {
         warn!("Not full chained crt");
         return Ok(crt_str.to_string());
     }
-    Ok(_regx(crt_str, CERT_REGEX, false)?)
+    Ok(_regx1(crt_str, CERT_REGEX)?)
 }
 
 fn _print_key_by_cmd_openssl(account_key_path: &str, is_ecc: bool) -> Result<Jwk, AcmeError> {
@@ -1436,7 +1471,7 @@ fn _sign_by_cmd_openssl(account_key_path: &str, plain: &str, is_ecc: bool, alg_l
 // openssl pkcs7 -print_certs -in ca.pk7 -text -noout
 fn _issuer_cmd_openssl(cert: &str) -> Result<String, AcmeError> {
     let cert = _regx2(&cert, CERT_REGEX)?;
-    //trace!("show out:{}", &cert);
+    debug!("Show intermediate cert:\n{}", &cert);
 
     let mut child = Command::new("openssl")
         .args(&["x509", "-text", "-noout"])
@@ -1450,10 +1485,10 @@ fn _issuer_cmd_openssl(cert: &str) -> Result<String, AcmeError> {
     }
     let out = child.wait_with_output()?;
     let out = String::from_utf8(out.stdout).unwrap();
-    trace!("show cert:\n{}", &out);
+    debug!("Show X509 intermediate cert:\n{}", &out);
 
-    let out = _regx(&out, ISSUER_REGEX, false)?.to_uppercase();
-    debug!("issuer: {}", &out);
+    let out = _regx1(&out, ISSUER_REGEX)?.to_uppercase();
+    debug!("Issuer:{}", &out);
 
     Ok(out)
 }
@@ -1472,7 +1507,7 @@ fn _asn1_parse(text: &str) -> Result<String, AcmeError> {
     //     .nth(1)
     //     .and_then(|cap| cap.get(1))
     //     .map_or("", |m| m.as_str());
-    let (ec_r, ec_s) = (_regx(text, re, false)?, _regx2(text, re)?);
+    let (ec_r, ec_s) = (_regx1(text, re)?, _regx2(text, re)?);
 
     trace!("ec_r: {}\nec_s: {}", ec_r, ec_s);
 
@@ -1487,6 +1522,9 @@ fn _regx2(text: &str, reg: &str) -> Result<String, AcmeError> {
         .and_then(|cap| cap.get(1))
         .map_or("", |m| m.as_str());
     Ok(p.to_string())
+}
+fn _regx1(text: &str, reg: &str) -> Result<String, AcmeError> {
+    Ok(_regx(text, reg, false)?)
 }
 fn _regx(text: &str, reg: &str, need_rep: bool) -> Result<String, AcmeError> {
     let non_greedy_re = Regex::new(reg)?;
