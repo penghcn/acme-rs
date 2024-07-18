@@ -56,7 +56,7 @@ log     | info | Case-insensitive. Log level: info,debug,trace
         listen 80;
         server_name ai8.rs www.ai8.rs;
         location /.well-known/acme-challenge/ {
-            alias /www/ai8.rs/challenges/;
+            alias /www/ai8.rs/.well-known/acme-challenge/;
             try_files $uri =404;
         }
 
@@ -90,9 +90,9 @@ Parameter must match the nginx configuration. For example:
     ## dns=ai8.rs,www.ai8.rs
     server_name ai8.rs www.ai8.rs;
 
-    ## The "/challenges/" directory is a fixed path
+    ## The "/.well-known/acme-challenge/" directory is a fixed path
     ## dir=/www/ai8.rs
-    alias /www/ai8.rs/challenges/;
+    alias /www/ai8.rs/.well-known/acme-challenge/;
 
     ## The files "/.acme/chained.pem" and "/.acme/domain.key" are at fixed paths
     ## dir=/www/ai8.rs
