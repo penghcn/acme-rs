@@ -16,7 +16,7 @@ For Nginx configuration:
                 
 For Apache configuration:
     SSLEngine on
-    SSLCertificateFile /www/ai8.rs/.acme/sign.crt
+    SSLCertificateFile /www/ai8.rs/.acme/domain.crt
     SSLCertificateKeyFile /www/ai8.rs/.acme/chained.crt
     SSLCertificateChainFile /www/ai8.rs/.acme/domain.key
 07/11 12:16:06.137 INFO  [main.rs:144] - Next execution: 2024-10-07T00:00:00+08:00,1728230400 Instant { tv_sec: 16297041, tv_nsec: 684065965 }
@@ -94,9 +94,9 @@ Parameter must match the nginx configuration. For example:
     ## dir=/www/ai8.rs
     alias /www/ai8.rs/.well-known/acme-challenge/;
 
-    ## The files "/.acme/chained.pem" and "/.acme/domain.key" are at fixed paths
+    ## The files "/.acme/chained.crt" and "/.acme/domain.key" are at fixed paths
     ## dir=/www/ai8.rs
-    ssl_certificate /www/ai8.rs/.acme/chained.pem;
+    ssl_certificate /www/ai8.rs/.acme/chained.crt;
     ssl_certificate_key /www/ai8.rs/.acme/domain.key;
 ```
 

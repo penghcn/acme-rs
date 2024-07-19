@@ -40,7 +40,7 @@ const PATH_CACHE_KID: &str = "/.cache.kid";
 const PATH_ACCOUNT_KEY: &str = "/account.key";
 
 const DOMAIN_KEY: &str = "domain.key";
-const DOMAIN_CRT: &str = "sign.crt";
+const DOMAIN_CRT: &str = "domain.crt";
 const CHAINED_CRT: &str = "chained.crt";
 const DOMAIN_SSL3: [&str; 3] = [DOMAIN_KEY, DOMAIN_CRT, CHAINED_CRT];
 
@@ -1161,14 +1161,11 @@ async fn _new_acct(
     let sig_body = SigBody::from(payload, protected, ak_path)?;
 
     let res = _http_json(&url, sig_body.to_string()?, Method::POST).await?;
-	if res.2 > 300 {
-		return AcmeError::tip(TIP_ACCOUNT_FAILED);
-	}
+    if res.2 > 300 {
+        return AcmeError::tip(TIP_ACCOUNT_FAILED);
+    }
 
-    let (nonce, kid) = (
-        _get_header(HEADER_REPLAY_NONCE, &res.0),
-        _get_header(HEADER_LOCATION, &res.0),
-    );
+    let (nonce, kid) = (_get_header(HEADER_REPLAY_NONCE, &res.0), _get_header(HEADER_LOCATION, &res.0));
 
     let _ = _write_file(&_cache_path, &kid.as_bytes())?;
 
