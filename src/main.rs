@@ -35,13 +35,14 @@ const DIR_CA_GOOGLE_TRUST: &str = "/goog/v02";
 
 const DIR_CHALLENGE: &str = "/.well-known/acme-challenge/";
 const DIR_ACME: &str = "/.acme";
-const DIR_BACKUP: &str = "/.backup";
+const DIR_BACKUP: &str = "/backup";
 const PATH_CACHE_KID: &str = "/.cache.kid";
 const PATH_ACCOUNT_KEY: &str = "/account.key";
 
 const DOMAIN_KEY: &str = "domain.key";
 const DOMAIN_CRT: &str = "sign.crt";
 const CHAINED_CRT: &str = "chained.crt";
+const DOMAIN_SSL3: [&str; 3] = [DOMAIN_KEY, DOMAIN_CRT, CHAINED_CRT];
 
 const CERT_BEGIN: &str = "-----BEGIN CERTIFICATE-----";
 const CERT_REGEX: &str = r"(-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----)";
@@ -85,6 +86,7 @@ const TIP_REQUIRED_EMAIL: &str = "Required email, add param like: email=a@a.org"
 const TIP_DOWN_CRT_FAILED: &str = "Download certificate failed, exiting.";
 const TIP_MAX_TRY: &str = "Maximum attempts reached, exiting.";
 const TIP_EAB_FAILED: &str = "Get Eab Fialed.";
+const TIP_ACCOUNT_FAILED: &str = "Get Acccount Fialed.";
 const TIP_TYPE_HTTP_FAILED: &str = "Get challenges http-01 Fialed.";
 const TIP_REGEX_FAILED: &str = "Match Regex Fialed.";
 
@@ -168,7 +170,7 @@ async fn acme_issue3(cfg: &AcmeCfg) -> () {
                 info!(
         		"Successfully.\nFor Nginx configuration:\n\tssl_certificate {1}\n\tssl_certificate_key {2}
         		\nFor Apache configuration:\n\tSSLEngine on\n\tSSLCertificateFile {0}\n\tSSLCertificateKeyFile {1}\n\tSSLCertificateChainFile {2}",
-        		paths.0, paths.1, paths.2
+        		&paths[0], &paths[1], &paths[2]
         	);
                 return;
             }
@@ -178,7 +180,7 @@ async fn acme_issue3(cfg: &AcmeCfg) -> () {
     }
 }
 
-async fn acme_issue(cfg: &AcmeCfg) -> Result<(String, String, String), AcmeError> {
+async fn acme_issue(cfg: &AcmeCfg) -> Result<Vec<String>, AcmeError> {
     // 0 初始化参数，获取或者默认值
     info!("Step 1 Init Params: {:?}", cfg);
 
@@ -219,7 +221,7 @@ async fn acme_issue(cfg: &AcmeCfg) -> Result<(String, String, String), AcmeError
     //let email = if external_account_required { cfg.email } else { None };
     //let email = cfg.email.filter(|_| external_account_required);
     let (nonce, kid) = _new_acct(dir.new_account, nonce, &cfg, &account_key_path, &alg, jwk).await?;
-    info!("Step 3.3 GET account. {}", kid);
+    info!("Step 3.3 GET account: {}", kid);
 
     // 4 下单 -> 验证每个域名 -> 验证每个域名
     // 4.1 下单 /acme/new-order
@@ -288,7 +290,7 @@ async fn acme_issue(cfg: &AcmeCfg) -> Result<(String, String, String), AcmeError
 
     // 4.3 finalize csr
     // domain key 算法默认ECC384，通过参数指定(参考enum Alg)，目前支持 rsa2048,rsa4096,prime256v1,prime384v1
-    let (csr, domain_key_path) = _gen_csr_by_cmd_openssl(&cfg.acme_dir, &cfg.domain_alg, &cfg.dns)?;
+    let (csr, _domain_key_path) = _gen_csr_by_cmd_openssl(&cfg.acme_ca_dir, &cfg.domain_alg, &cfg.dns)?;
 
     info!("Step 4.3 Finalize domain with csr.");
     let fin_url = &order_res.finalize.unwrap();
@@ -324,11 +326,12 @@ async fn acme_issue(cfg: &AcmeCfg) -> Result<(String, String, String), AcmeError
     };
     info!("Step 4.4 Download certificate file. Named {}", DOMAIN_CRT);
     let domain_crt = _down_certificate(&cert_url, mut_nonce, &account_key_path, &alg, &kid, &cfg.preferred_chain).await?;
+    let _ = _x509_one_cmd_openssl(&domain_crt)?;
 
     // 5.1、最后，合并sign.crt和intermediate.pem的内容成 chained.pem
-    let domain_crt_path = format!("{}/{}", cfg.acme_dir, DOMAIN_CRT);
-    let chained_pem_path = format!("{}/{}", cfg.acme_dir, CHAINED_CRT);
-    info!("Step 5.1 Wirte to {} and {}", DOMAIN_CRT, CHAINED_CRT);
+    let domain_crt_path = format!("{}/{}", cfg.acme_ca_dir, DOMAIN_CRT);
+    let chained_pem_path = format!("{}/{}", cfg.acme_ca_dir, CHAINED_CRT);
+    info!("Step 4.5 Wirte to {} and {}", DOMAIN_CRT, CHAINED_CRT);
 
     let (domain_pem, chained_pem) = match cfg.ca.intermediate_url(cfg.domain_alg.is_ecc()) {
         Some(_url) => {
@@ -341,35 +344,30 @@ async fn acme_issue(cfg: &AcmeCfg) -> Result<(String, String, String), AcmeError
     let _ = _write_file(&domain_crt_path, &domain_pem.as_bytes())?;
     let _ = _write_file(&chained_pem_path, &chained_pem.as_bytes())?;
 
-    // 5.2、复制小文件到备份目录
-    let bk_no = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-    let bk_dir = format!("{0}{1}", cfg.acme_ca_dir, DIR_BACKUP);
+    _ssl_and_backup(&cfg.ssl_dir, &cfg.acme_ca_dir)
+}
 
-    info!("Step 5.2 Backup to: {}", &bk_dir);
+fn _ssl_and_backup(ssl_dir: &str, acme_ca_dir: &str) -> Result<Vec<String>, AcmeError> {
+    // 复制小文件到备份目录
+    let bk_no = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    let bk_dir = format!("{0}{1}", acme_ca_dir, DIR_BACKUP);
+
+    info!("Step 5.1 Backup to: {}", &bk_dir);
     let bk_dir_path = Path::new(&bk_dir);
     if !bk_dir_path.exists() {
         debug!("Created path: {:?}", bk_dir_path);
         fs::create_dir_all(bk_dir_path)?; // 递归创建目录
     }
 
-    let _ = fs::copy(&domain_crt_path, format!("{}/{}.{}", bk_dir, bk_no, DOMAIN_CRT))?;
-    let _ = fs::copy(&chained_pem_path, format!("{}/{}.{}", bk_dir, bk_no, CHAINED_CRT))?;
-    let _ = fs::copy(&domain_key_path, format!("{}/{}.{}", bk_dir, bk_no, DOMAIN_KEY))?;
-
-    //5.3 若需要，复制到指定的证书目录下，文件名不变
-    if let Some(ssl_dir) = &cfg.ssl_dir {
-        info!("Step 5.3 Copy to: {}", &ssl_dir);
-        if !Path::new(&ssl_dir).exists() {
-            return AcmeError::tip(&format!("The directory does not exist: {}", &ssl_dir));
-        }
-        let _ = fs::copy(&domain_crt_path, format!("{}/{}", ssl_dir, DOMAIN_CRT))?;
-        let _ = fs::copy(&chained_pem_path, format!("{}/{}", ssl_dir, CHAINED_CRT))?;
-        let _ = fs::copy(&domain_key_path, format!("{}/{}", ssl_dir, DOMAIN_KEY))?;
+    info!("Step 5.2 Copy to: {}", &ssl_dir);
+    let mut list: Vec<String> = Vec::new();
+    for s in DOMAIN_SSL3 {
+        let (from, ssl_path) = (format!("{}/{}", acme_ca_dir, s), format!("{}/{}", ssl_dir, s));
+        let _ = fs::copy(&from, &ssl_path)?; //ssl
+        let _ = fs::copy(&from, format!("{}/{}.{}", bk_dir, bk_no, s))?; //backup
+        list.push(ssl_path);
     }
-
-    let result = (domain_crt_path, chained_pem_path, domain_key_path);
-
-    Ok(result)
+    Ok(list)
 }
 
 trait CA {
@@ -509,14 +507,13 @@ struct AcmeCfg {
     dns: Vec<String>,
     email: Option<String>,
     acme_root: String,   //根目录，如 /www/ai8.rs
-    acme_dir: String,    //acme运行的目录，如 /www/ai8.rs/.acme
     acme_ca_dir: String, //acme运行的ca相关，如一些缓存，如 /www/ai8.rs/.acme/letsencrypt/v02
+    ssl_dir: String,     //domin.key,chained.pem等文件复制到指定的证书目录下, 默认/www/ai8.rs/.acme/ssl
     ca: AcmeCa,
     preferred_chain: Option<String>,
     domain_alg: Alg,
     log_level: LevelFilter,
     eab: Eab,
-    ssl_dir: Option<String>, //domin.key,chained.pem等文件复制到指定的证书目录下
 }
 
 impl AcmeCfg {
@@ -552,6 +549,8 @@ impl AcmeCfg {
 
         let acme_dir = format!("{0}{1}", acme_root, DIR_ACME);
         let acme_ca_dir = format!("{0}{1}", acme_dir, ca.ca_dir());
+
+        let ssl_dir = map.get("ssl_dir").map(|s| s.to_string()).unwrap_or(acme_dir);
         let _path = Path::new(&acme_ca_dir);
         if !_path.exists() {
             debug!("Create path: {:?}", _path);
@@ -575,20 +574,18 @@ impl AcmeCfg {
         let eab_kid = map.get("eab_kid").map(|s| s.to_string());
         let eab_hmac_key = map.get("eab_key").map(|s| s.to_string());
         let eab = Eab::new(eab_kid, eab_hmac_key);
-        let ssl_dir = map.get("ssl_dir").map(|s| s.to_string());
 
         Ok(AcmeCfg {
             dns,
             email,
             acme_root,
-            acme_dir,
             acme_ca_dir,
+            ssl_dir,
             ca,
             preferred_chain,
             domain_alg,
             log_level,
             eab,
-            ssl_dir,
         })
     }
 }
@@ -1163,11 +1160,14 @@ async fn _new_acct(
     let protected = Protected::from(&url, nonce, alg, jwk);
     let sig_body = SigBody::from(payload, protected, ak_path)?;
 
-    let headers = _http_json(&url, sig_body.to_string()?, Method::POST).await?.0;
+    let res = _http_json(&url, sig_body.to_string()?, Method::POST).await?;
+	if res.2 > 300 {
+		return AcmeError::tip(TIP_ACCOUNT_FAILED);
+	}
 
     let (nonce, kid) = (
-        _get_header(HEADER_REPLAY_NONCE, &headers),
-        _get_header(HEADER_LOCATION, &headers),
+        _get_header(HEADER_REPLAY_NONCE, &res.0),
+        _get_header(HEADER_LOCATION, &res.0),
     );
 
     let _ = _write_file(&_cache_path, &kid.as_bytes())?;
@@ -1280,7 +1280,8 @@ async fn _down_certificate(
     let cert = res.1;
 
     if let Some(preferred_chain) = preferred_chain {
-        if preferred_chain == &_issuer_cmd_openssl(&cert)? {
+        let issuer = _issuer_cmd_openssl(&cert)?;
+        if preferred_chain == &issuer {
             return Ok(cert);
         }
 
@@ -1299,13 +1300,15 @@ async fn _down_certificate(
 
         let url = match url {
             Some(url) => url,
-            None => return Ok(cert),
+            None => {
+                warn!("Not support alternate link, still use the cert by issuer:{}", issuer);
+                return Ok(cert);
+            }
         };
 
         //let url = format!("{}/1", url);
         let res = _post_kid(&url, nonce, file_path, alg, kid, None).await?;
         if res.2 != 200 {
-            //return AcmeError::tip(TIP_DOWN_CRT_FAILED);
             warn!("Not support preferred chain: {}", preferred_chain);
             return Ok(cert);
         }
@@ -1386,10 +1389,10 @@ fn _gen_csr_by_cmd_openssl(acme_dir: &str, domain_key_alg: &Alg, dns: &Vec<Strin
 
     let b = ["req", "-in", &domain_csr_path, "-outform", "DER"];
     let out = Command::new("openssl").args(b).output()?;
-    let out = _base64(&out.stdout);
-    trace!("{}", out);
+    let csr = _base64(&out.stdout);
+    trace!("{}", csr);
 
-    Ok((out, domain_key_path))
+    Ok((csr, domain_key_path))
 }
 
 // 覆盖写入
@@ -1466,13 +1469,15 @@ fn _sign_by_cmd_openssl(account_key_path: &str, plain: &str, is_ecc: bool, alg_l
     }
 }
 
+fn _issuer_cmd_openssl(cert: &str) -> Result<String, AcmeError> {
+    let intermediate_cert = _regx2(&cert, CERT_REGEX)?;
+    //debug!("Show intermediate cert:\n{}", &intermediate_cert);
+    _x509_one_cmd_openssl(&intermediate_cert)
+}
 // openssl crl2pkcs7 -nocrl -certfile ca.crt | openssl pkcs7 -print_certs -text -noout
 // openssl crl2pkcs7 -nocrl -certfile ca.crt > ca.pk7
 // openssl pkcs7 -print_certs -in ca.pk7 -text -noout
-fn _issuer_cmd_openssl(cert: &str) -> Result<String, AcmeError> {
-    let cert = _regx2(&cert, CERT_REGEX)?;
-    debug!("Show intermediate cert:\n{}", &cert);
-
+fn _x509_one_cmd_openssl(cert: &str) -> Result<String, AcmeError> {
     let mut child = Command::new("openssl")
         .args(&["x509", "-text", "-noout"])
         .stdin(Stdio::piped())
@@ -1485,12 +1490,12 @@ fn _issuer_cmd_openssl(cert: &str) -> Result<String, AcmeError> {
     }
     let out = child.wait_with_output()?;
     let out = String::from_utf8(out.stdout).unwrap();
-    debug!("Show X509 intermediate cert:\n{}", &out);
+    debug!("Show X509 first cert:\n{}", &out);
 
-    let out = _regx1(&out, ISSUER_REGEX)?.to_uppercase();
-    debug!("Issuer:{}", &out);
+    let issuer = _regx1(&out, ISSUER_REGEX)?.to_uppercase();
+    debug!("Issuer:{}", &issuer);
 
-    Ok(out)
+    Ok(issuer)
 }
 
 /*
@@ -1524,7 +1529,7 @@ fn _regx2(text: &str, reg: &str) -> Result<String, AcmeError> {
     Ok(p.to_string())
 }
 fn _regx1(text: &str, reg: &str) -> Result<String, AcmeError> {
-    Ok(_regx(text, reg, false)?)
+    _regx(text, reg, false)
 }
 fn _regx(text: &str, reg: &str, need_rep: bool) -> Result<String, AcmeError> {
     let non_greedy_re = Regex::new(reg)?;
