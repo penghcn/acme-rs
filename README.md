@@ -11,8 +11,8 @@ Successful Log.
 ```
 07/11 12:16:06.136 INFO  [main.rs:165] - Successfully.
 For Nginx configuration:
-    ssl_certificate /www/ai8.rs/.acme/chained.crt
-    ssl_certificate_key /www/ai8.rs/.acme/domain.key
+    ssl_certificate /www/ai8.rs/.acme/chained.crt;
+    ssl_certificate_key /www/ai8.rs/.acme/domain.key;
                 
 For Apache configuration:
     SSLEngine on

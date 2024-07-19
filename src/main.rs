@@ -168,7 +168,7 @@ async fn acme_issue3(cfg: &AcmeCfg) -> () {
             Err(_e) => error!("{}", _e.to_string()),
             Ok(paths) => {
                 info!(
-        		"Successfully.\nFor Nginx configuration:\n\tssl_certificate {1}\n\tssl_certificate_key {2}
+        		"Successfully.\nFor Nginx configuration:\n\tssl_certificate {1};\n\tssl_certificate_key {2};
         		\nFor Apache configuration:\n\tSSLEngine on\n\tSSLCertificateFile {0}\n\tSSLCertificateKeyFile {1}\n\tSSLCertificateChainFile {2}",
         		&paths[0], &paths[1], &paths[2]
         	);
