@@ -1,6 +1,6 @@
 use crate::{
-    crypt::*, read_cache, write_file, ALG_HMAC_256, CHAINED_CRT, DIR_BACKUP, DIR_CHALLENGE, DOMAIN_CRT, DOMAIN_SSL3, MAX_TRY,
-    SLEEP_DURATION_SEC_2, SLEEP_DURATION_SEC_5,
+    create_dir, crypt::*, read_cache, write_file, ALG_HMAC_256, CHAINED_CRT, DIR_BACKUP, DIR_CHALLENGE, DOMAIN_CRT,
+    DOMAIN_SSL3, MAX_TRY, SLEEP_DURATION_SEC_2, SLEEP_DURATION_SEC_5,
 };
 use crate::{
     AcmeCfg, AcmeError, Alg, Eab, ACCOUNT_ALG_DEFAULT_EC2, PATH_ACCOUNT_KEY, PATH_CACHE_KID, PUB_ECC_REGEX, PUB_RSA_REGEX,
@@ -33,15 +33,15 @@ const TIP_ACCOUNT_FAILED: &str = "Get Acccount Fialed.";
 const TIP_TYPE_HTTP_FAILED: &str = "Get challenges http-01 Fialed.";
 
 pub async fn acme_issue(cfg: &AcmeCfg) -> Result<Vec<String>, AcmeError> {
-    // 0 初始化参数，获取或者默认值
+    // 1 初始化参数，获取或者默认值
     info!("Step 1 Init Params: {:?}", cfg);
 
-    // 1 获取接口  /directory
+    // 2 获取接口  /directory
     let dir = _directory(cfg.ca.directory_url()).await?;
     info!("Step 2 GET Directory. {:?}", dir);
     let required_external_account = dir.meta.external_account_required.unwrap_or(false);
 
-    // 1.1 是否需要扩展账户信息eab，目前就是zerossl,gts
+    // 2.1 是否需要扩展账户信息eab，目前就是zerossl,gts
     if required_external_account & cfg.email.is_none() {
         return AcmeError::tip(TIP_REQUIRED_EMAIL);
     }
@@ -181,7 +181,7 @@ pub async fn acme_issue(cfg: &AcmeCfg) -> Result<Vec<String>, AcmeError> {
     let domain_crt = _down_certificate(&cert_url, mut_nonce, &account_key_path, &alg, &kid, &cfg.preferred_chain).await?;
     let _ = x509_one_cmd_openssl(&domain_crt)?;
 
-    // 5.1、最后，合并sign.crt和intermediate.pem的内容成 chained.pem
+    // 4.5 合并sign.crt和intermediate.pem的内容成 chained.pem
     let domain_crt_path = format!("{}/{}", cfg.acme_ca_dir, DOMAIN_CRT);
     let chained_pem_path = format!("{}/{}", cfg.acme_ca_dir, CHAINED_CRT);
     info!("Step 4.5 Wirte to {} and {}", DOMAIN_CRT, CHAINED_CRT);
@@ -197,6 +197,7 @@ pub async fn acme_issue(cfg: &AcmeCfg) -> Result<Vec<String>, AcmeError> {
     let _ = write_file(&domain_crt_path, &domain_pem.as_bytes())?;
     let _ = write_file(&chained_pem_path, &chained_pem.as_bytes())?;
 
+    // 5 备份、复制
     _ssl_and_backup(&cfg.ssl_dir, &cfg.acme_ca_dir)
 }
 
@@ -206,11 +207,7 @@ fn _ssl_and_backup(ssl_dir: &str, acme_ca_dir: &str) -> Result<Vec<String>, Acme
     let bk_dir = format!("{0}{1}", acme_ca_dir, DIR_BACKUP);
 
     info!("Step 5.1 Backup to: {}", &bk_dir);
-    let bk_dir_path = Path::new(&bk_dir);
-    if !bk_dir_path.exists() {
-        debug!("Created path: {:?}", bk_dir_path);
-        fs::create_dir_all(bk_dir_path)?; // 递归创建目录
-    }
+    let _ = create_dir(&bk_dir);
 
     info!("Step 5.2 Copy to: {}", &ssl_dir);
     let mut list: Vec<String> = Vec::new();
@@ -288,13 +285,11 @@ fn _get_header(key: &str, headers: &reqwest::header::HeaderMap) -> String {
 
 // 多key情况
 fn _get_headers(key: &str, headers: &reqwest::header::HeaderMap) -> Vec<String> {
-    let mut list: Vec<String> = Vec::new();
-    for (k, v) in headers {
-        if k.as_str() == key {
-            list.push(v.to_str().unwrap().to_string());
-        }
-    }
-    list
+    headers
+        .iter()
+        .filter(|(k, _)| k.as_str() == key)
+        .filter_map(|(_, v)| v.to_str().ok().map(|s| s.to_string()))
+        .collect()
 }
 
 async fn _new_nonce(url: &str) -> Result<String, AcmeError> {
@@ -391,7 +386,7 @@ async fn _new_order(
     file_path: &str,
     alg: &str,
     kid: &str,
-    dns: &Vec<String>,
+    dns: &[String],
 ) -> Result<(String, OrderRes), AcmeError> {
     let res = _post_kid(url, nonce, file_path, alg, kid, Payload::_new_order(dns)).await?;
     let nonce = _get_header(HEADER_REPLAY_NONCE, &res.0);
@@ -416,13 +411,10 @@ async fn _auth_domain(
 async fn _write_to_challenges(token: String, domain: &str, acme_dir: &str, thumbprint: &str) -> Result<String, AcmeError> {
     let token = token.replace(r"[^A-Za-z0-9_\-]", "_");
     let key_authorization = format!("{0}.{1}", token, thumbprint);
-    let well_known_path = format!("{}{}{}", acme_dir, DIR_CHALLENGE, token);
-    if let Some(_path) = Path::new(&well_known_path).parent() {
-        if !_path.exists() {
-            debug!("Create parent: {:?}", _path);
-            fs::create_dir_all(_path)?; // 递归创建目录
-        }
-    }
+    let well_known_dir = format!("{}{}", acme_dir, DIR_CHALLENGE);
+    let _ = create_dir(&well_known_dir);
+    let well_known_path = format!("{}{}", well_known_dir, token);
+
     let _ = write_file(&well_known_path, &key_authorization.as_bytes())?;
     let wellknown_url = format!("http://{0}{1}{2}", domain, DIR_CHALLENGE, token);
     let ka = _http_json(&wellknown_url, None, Method::GET).await?.1; // 自己先验一下
@@ -617,7 +609,7 @@ impl Payload {
             contact: Some(vec![format!("mailto:{}", email)]),
         })
     }
-    fn _new_order(dns: &Vec<String>) -> Option<Self> {
+    fn _new_order(dns: &[String]) -> Option<Self> {
         let list: Vec<Identifier> = dns.iter().map(|s| Identifier::new(s.to_string())).collect();
         Some(Payload {
             identifiers: Some(list),

@@ -73,6 +73,7 @@ const TIP_INVALID_DNS: &str = "Wildcard domain names like *.a.com are not suppor
 const TIP_REGEX_FAILED: &str = "Match Regex Fialed.";
 
 pub async fn simple_cron(cfg: &AcmeCfg) -> Result<(), AcmeError> {
+    log::set_max_level(cfg.log_level);
     // quartz
     // let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(90 * 24 * 60 * 60)); //90天
     // loop {
@@ -123,23 +124,15 @@ pub struct AcmeCfg {
     ca: AcmeCa,
     preferred_chain: Option<String>,
     domain_alg: Alg,
-    pub log_level: LevelFilter,
+    log_level: LevelFilter,
     eab: Eab,
 }
 
 impl AcmeCfg {
-    pub fn new(args: Vec<String>) -> Result<Self, AcmeError> {
-        let mut map: HashMap<&str, &str> = HashMap::new();
-        for arg in args.iter() {
-            //let (k, v) = arg.split_once('=').ok_or_else(|| AcmeError::Tip("参数格式错误".to_string()))?;
-            //map.insert(k, v);
-            if let Some((k, v)) = arg.split_once('=') {
-                map.insert(k, v);
-            }
-        }
+    pub fn new(args: &[String]) -> Result<Self, AcmeError> {
+        let map: HashMap<&str, &str> = args.iter().filter_map(|arg| arg.split_once('=')).collect();
 
         let dns = map.get("dns").ok_or_else(|| AcmeError::Tip(TIP_MISSING_DNS.to_string()))?;
-
         if dns.contains("*") {
             return AcmeError::tip(TIP_INVALID_DNS);
         }
@@ -162,11 +155,7 @@ impl AcmeCfg {
         let acme_ca_dir = format!("{0}{1}", acme_dir, ca.ca_dir());
 
         let ssl_dir = map.get("ssl_dir").map(|s| s.to_string()).unwrap_or(acme_dir);
-        let _path = Path::new(&acme_ca_dir);
-        if !_path.exists() {
-            debug!("Create path: {:?}", _path);
-            fs::create_dir_all(_path)?; // 递归创建目录
-        }
+        let _ = create_dir(&acme_ca_dir);
 
         let preferred_chain = map
             .get("preferred_chain")
@@ -294,7 +283,7 @@ fn _tokio_instant(next_execution: NaiveDateTime) -> Result<tokio::time::Instant,
 async fn _acme_issue3(cfg: &AcmeCfg) -> () {
     // retry 2
     for i in 0..3 {
-        debug!("Loop {}/3, acme issue", i + 1);
+        debug!("Loop {}/3, acme issue...", i + 1);
         match acme_issue(&cfg).await {
             Err(_e) => error!("{}", _e.to_string()),
             Ok(paths) => {
@@ -338,6 +327,15 @@ fn _cache_expire_then_rm(file_path: &str) -> Result<(), AcmeError> {
             CACHE_EXPIRE_DAY, &file_path
         );
         fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+fn create_dir(dir_path: &str) -> Result<(), AcmeError> {
+    let _path = Path::new(&dir_path);
+    if !_path.exists() {
+        debug!("Created path: {:?}", _path);
+        fs::create_dir_all(_path)?; // 递归创建目录
     }
     Ok(())
 }
