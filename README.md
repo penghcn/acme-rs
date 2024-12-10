@@ -35,6 +35,11 @@ Google Trust Services.
 cargo run --  dns=ai8.rs,www.ai8.rs dir=/www/ai8.rs ca=g email=a@a.rs alg=rsa4 eab_kid=... eab_key=...
 ```
 
+Use dns api, wildcard domain names like *.a.com are supported
+```
+cargo run --  dns=ai8.rs dir=/www/ai8.rs da=ali da_sid=... da_key=...
+```
+
 3) For more parameter configurations, please refer to the following.
 
 key | default | description
@@ -44,6 +49,9 @@ dir     | -    | Required, acme root path, must match your nginx config, e.g. /w
 email   | -    | Register account email
 eab_kid | -    | `<eab_kid>`, for Google Trust Services
 eab_key | -    | `<eab_hmac_key>`, for Google Trust Services
+da      | -    | dns api, e.g. "ali","aliyun","dp","dnspod"
+da_sid  | -    | `<secret_id>`, for dns api
+da_key  | -    | `<secret_key>`, for dns api
 ssl_dir | -    | Path to copy the ssl certificate files to after issue/renew. Such as /www/ssl
 ca      | le   | Case-insensitive. The defalut is "le", which stands for Let's Encrypt. ZeroSSL can be abbreviated as "Z","z","zero". Google Trust Services as "g"
 alg     | ec3  | Case-insensitive. Algorithm abbreviation: ec2,ec3,rsa2,rsa4, which are secp256r1,secp384r1,rsa2048,rsa4096

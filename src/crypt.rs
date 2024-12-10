@@ -17,6 +17,16 @@ pub fn base64_hmac256(key: &str, s: &str) -> String {
     mac.update(s.as_bytes());
     base64(&mac.finalize().into_bytes())
 }
+pub fn hmac256(key: &[u8], s: &str) -> Vec<u8> {
+    type HmacSha256 = Hmac<Sha256>;
+    let mut mac = HmacSha256::new_from_slice(key).expect("...");
+    mac.update(s.as_bytes());
+    mac.finalize().into_bytes().to_vec()
+}
+
+pub fn hex_hmac256(key: &[u8], s: &str) -> String {
+    hex::encode(hmac256(key, s))
+}
 
 fn _durl_base64(input: &str) -> String {
     let padding = match input.len() % 4 {
@@ -44,6 +54,15 @@ pub fn base64_sha256(p: &str) -> String {
     let b64_hash = base64(&hash);
     trace!("sha2 sha256 base64: {}", b64_hash);
     b64_hash
+}
+pub fn sha256(p: &str) -> String {
+    //let p = r#"{"crv":"P-256","kty":"EC","x":"MysViqQWRtiId88Tr5-PkZzLQ64WagPZF_WFPJk_LIE","y":"WByhhlb7q50I-uXme6YSG042gMslQuiy1st36FUn3MQ"}"#;
+    let mut hasher = Sha256::new();
+    hasher.update(p.as_bytes());
+    let hash = hasher.finalize();
+    let hex_hash = hex::encode(&hash);
+    trace!("sha2 sha256 hex: {}", hex_hash);
+    hex_hash
 }
 
 pub fn gen_key_by_cmd_openssl(alg: &Alg) -> Result<Vec<u8>, AcmeError> {
@@ -224,4 +243,15 @@ pub fn regx(text: &str, reg: &str, need_rep: bool) -> Result<String, AcmeError> 
     } else {
         return AcmeError::tip(TIP_REGEX_FAILED);
     }
+}
+
+pub fn extract_simple_root_domain(domain: &str) -> Option<String> {
+    let re = Regex::new(r"(?i)(?:^|\.)([a-z0-9-]+\.(com|net|org|io|cn|edu|gov|info|biz|[a-z]{2,})(?:\.[a-z]{2})?)$").unwrap();
+    // 匹配并提取一级域名
+    if re.is_match(domain) {
+        if let Some(captures) = re.captures(domain) {
+            return captures.get(1).map(|m| m.as_str().to_string());
+        }
+    }
+    None
 }

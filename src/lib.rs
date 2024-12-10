@@ -1,12 +1,15 @@
 mod acme;
 mod crypt;
+mod dnsapi;
 
 use acme::acme_issue;
 use chrono::{Duration as ChronoDuration, Local, NaiveDateTime, TimeZone};
 use log::{debug, error, info, Level, LevelFilter, Log, Record};
+
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::Deserialize;
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     fs::{self, File},
     io::Write,
     path::Path,
@@ -64,6 +67,10 @@ const MAX_TRY: u8 = 8; //重试最大次数
 const SLEEP_DURATION_SEC_2: Duration = Duration::from_secs(2); //2s
 const SLEEP_DURATION_SEC_5: Duration = Duration::from_secs(5); //5s
 const LOG_LEVEL_DEAULT: LevelFilter = LevelFilter::Debug;
+
+const CONTENT_TYPE_JSON: &str = "application/jose+json";
+const USER_AGENT: HeaderValue = HeaderValue::from_static("acme.rs");
+const TIMEOUT_SEC_30: Duration = Duration::from_secs(30); //30s
 
 const FMT_LOCAL_TIME: &str = "%m/%d %H:%M:%S%.3f"; // 07/08 09:53:37.520
 
@@ -126,25 +133,52 @@ pub struct AcmeCfg {
     domain_alg: Alg,
     log_level: LevelFilter,
     eab: Eab,
+    dns_api: Option<String>,
+    dns_api_sid: Option<String>,
+    dns_api_key: Option<String>,
 }
 
 impl AcmeCfg {
     pub fn new(args: &[String]) -> Result<Self, AcmeError> {
         let map: HashMap<&str, &str> = args.iter().filter_map(|arg| arg.split_once('=')).collect();
 
-        let dns = map.get("dns").ok_or_else(|| AcmeError::Tip(TIP_MISSING_DNS.to_string()))?;
-        if dns.contains("*") {
-            return AcmeError::tip(TIP_INVALID_DNS);
-        }
-        let dns = dns.split(",").map(|s| s.to_string()).collect();
+        let dns_api = map.get("da").map(|s| s.to_string());
 
-        let acme_root = map
+        let dns_api_sid = map.get("da_sid").map(|s| s.to_string());
+        let dns_api_key = map.get("da_key").map(|s| s.to_string());
+        if dns_api.is_some() {
+            if dns_api_sid.is_none() || dns_api_key.is_none() {
+                return AcmeError::tip(&format!("The dns api: {}, [id or key] does not exist", dns_api.unwrap()));
+            }
+        }
+
+        let dns = map.get("dns").ok_or_else(|| AcmeError::Tip(TIP_MISSING_DNS.to_string()))?;
+        let dns: Vec<String> = if dns.contains("*") {
+            if dns_api.is_none() {
+                return AcmeError::tip(TIP_INVALID_DNS);
+            }
+            let dns = crypt::extract_simple_root_domain(dns);
+            match dns {
+                Some(d) => [d].to_vec(),
+                None => return AcmeError::tip(TIP_INVALID_DNS),
+            }
+        } else {
+            dns.split(",").map(|s| s.to_string()).collect()
+        };
+
+        //let dns = dns.split(",").map(|s| s.to_string()).collect();
+
+        let mut acme_root = map
             .get("dir")
             .ok_or_else(|| AcmeError::Tip(TIP_MISSING_DIR.to_string()))?
             .to_string();
 
         if !Path::new(&acme_root).is_dir() {
-            return AcmeError::tip(&format!("The directory does not exist: {}", acme_root));
+            if dns_api.is_none() {
+                return AcmeError::tip(&format!("The directory does not exist: {}", acme_root));
+            }
+
+            acme_root = std::env::var("HOME").unwrap();
         }
 
         let email = map.get("email").map(|s| s.to_string());
@@ -186,6 +220,9 @@ impl AcmeCfg {
             domain_alg,
             log_level,
             eab,
+            dns_api,
+            dns_api_sid,
+            dns_api_key,
         })
     }
 }
@@ -350,6 +387,70 @@ fn write_file(file_path: &str, s: &[u8]) -> Result<(), AcmeError> {
     Ok(())
 }
 
+async fn http_post(
+    url: &str,
+    body: String,
+    headers: BTreeMap<&str, String>,
+) -> Result<(reqwest::header::HeaderMap, String, u16), AcmeError> {
+    http_request(&url, Some(body), headers, Method::POST).await
+}
+
+async fn http_json(
+    url: &str,
+    body: Option<String>,
+    method: Method,
+) -> Result<(reqwest::header::HeaderMap, String, u16), AcmeError> {
+    let headers = vec![("content-type", CONTENT_TYPE_JSON.to_string())].into_iter().collect();
+    http_request(url, body, headers, method).await
+}
+
+async fn http_request(
+    url: &str,
+    body: Option<String>,
+    headers: BTreeMap<&str, String>,
+    method: Method,
+) -> Result<(reqwest::header::HeaderMap, String, u16), AcmeError> {
+    //let params: HashMap<&str, &str> = [("host", h), ("type", "auto")].into_iter().collect();
+    let start = Instant::now();
+    debug!("==> HTTP {:?}: {}\nbody: {:?}", &method, url, &body);
+
+    let client = reqwest::Client::new();
+
+    let cb = match method {
+        Method::GET => client.get(url),
+        Method::HEAD => client.head(url),
+        _ => match body {
+            Some(body) => client.post(url).body(body),
+            _ => client.post(url),
+        },
+    };
+
+    let mut header_map = HeaderMap::new();
+    header_map.append("User-Agent", USER_AGENT);
+    for (k, v) in headers {
+        header_map.append(
+            HeaderName::from_bytes(k.as_bytes()).unwrap(),
+            HeaderValue::from_bytes(v.as_bytes()).unwrap(),
+        );
+    }
+    debug!("==> Request Headers: {:?}", &header_map);
+    let request_builder = cb.headers(header_map).timeout(TIMEOUT_SEC_30);
+
+    let response = request_builder.send().await.map_err(AcmeError::from)?;
+
+    let (c, h) = (response.status().as_u16(), response.headers().clone());
+    debug!(
+        "<== Response: {}, duration: {:.1}s. Header: {:?}",
+        c,
+        start.elapsed().as_secs_f32(),
+        response.headers()
+    );
+
+    let res = response.text().await?;
+    debug!("<== Response: {}", res);
+    Ok((h, res, c))
+}
+
 trait CA {
     fn ca_dir(&self) -> &'static str;
     fn directory_url(&self) -> &'static str;
@@ -510,3 +611,32 @@ struct EabError {
     _type: Option<String>,
     info: Option<String>,
 }
+
+#[derive(Debug)]
+enum Method {
+    POST,
+    GET,
+    HEAD,
+}
+
+// #[tokio::test]
+// async fn t2() -> Result<(), AcmeError> {
+//     log::set_boxed_logger(Box::new(AcmeLogger)).unwrap();
+//     log::set_max_level(LevelFilter::Debug);
+
+//     let domain = vec![
+//         "passet.com.cn",
+//         "*.passet.com.cn",
+//         "passet.com.cn,*.passet.com.cn",
+//         "*.passet.com.cn,a.passet.com.cn",
+//         "*.p.cn",
+//         "*.p.cn,a.p.cn",
+//         "a.p.cn,*.p.cn",
+//         "p.io",
+//     ];
+//     for d in &domain {
+//         println!("{}  -> {:?}", d, crypt::extract_simple_root_domain(d));
+//     }
+
+//     Ok(())
+// }

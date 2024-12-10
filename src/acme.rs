@@ -1,6 +1,6 @@
 use crate::{
-    create_dir, crypt::*, read_cache, write_file, ALG_HMAC_256, CHAINED_CRT, DIR_BACKUP, DIR_CHALLENGE, DOMAIN_CRT,
-    DOMAIN_SSL3, MAX_TRY, SLEEP_DURATION_SEC_2, SLEEP_DURATION_SEC_5,
+    create_dir, crypt::*, dnsapi, http_json, read_cache, write_file, Method, ALG_HMAC_256, CHAINED_CRT, DIR_BACKUP,
+    DIR_CHALLENGE, DOMAIN_CRT, DOMAIN_SSL3, MAX_TRY, SLEEP_DURATION_SEC_2, SLEEP_DURATION_SEC_5,
 };
 use crate::{
     AcmeCfg, AcmeError, Alg, Eab, ACCOUNT_ALG_DEFAULT_EC2, PATH_ACCOUNT_KEY, PATH_CACHE_KID, PUB_ECC_REGEX, PUB_RSA_REGEX,
@@ -11,18 +11,17 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs,
     path::Path,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
-
-const CONTENT_TYPE_JSON: &str = "application/jose+json";
-const USER_AGENT: &str = "acme.rs";
-const TIMEOUT_SEC_10: Duration = Duration::from_secs(10); //10s
 
 const LINK_ALT_REGEX: &str = "<(http.*)>;rel=\"alternate\"";
 const HEADER_REPLAY_NONCE: &str = "replay-nonce";
 const HEADER_LOCATION: &str = "location";
 const HEADER_LINK: &str = "link";
 const TYPE_HTTP: &str = "http-01";
+const TYPE_DNS: &str = "dns-01";
+const TYPE_DNS_RR: &str = "_acme-challenge";
+
 const STATUS_OK: &str = "valid"; //valid. pending, ready, processing. invalid
 const STATUS_PENDING: &str = "pending"; //valid. pending, ready, processing. invalid
 const TIP_REQUIRED_EMAIL: &str = "Required email, add param like: email=a@a.org";
@@ -31,6 +30,7 @@ const TIP_MAX_TRY: &str = "Maximum attempts reached, exiting.";
 const TIP_EAB_FAILED: &str = "Get Eab Fialed.";
 const TIP_ACCOUNT_FAILED: &str = "Get Acccount Fialed.";
 const TIP_TYPE_HTTP_FAILED: &str = "Get challenges http-01 Fialed.";
+const TIP_TYPE_DNS_FAILED: &str = "Get challenges dns-01 Fialed.";
 
 pub async fn acme_issue(cfg: &AcmeCfg) -> Result<Vec<String>, AcmeError> {
     // 1 初始化参数，获取或者默认值
@@ -113,32 +113,35 @@ pub async fn acme_issue(cfg: &AcmeCfg) -> Result<Vec<String>, AcmeError> {
             }
         }
 
-        info!("Verifying {0}...", domain);
-        let chall = challenges.into_iter().filter(|c| c._type == TYPE_HTTP).next();
-        let chall = match chall {
-            Some(chall) => chall,
-            None => return AcmeError::tip(TIP_TYPE_HTTP_FAILED),
-        };
+        if let Some(da) = &cfg.dns_api {
+            info!("Verifying by dns type {0}...", domain);
+            let chall = challenges.into_iter().filter(|c| c._type == TYPE_DNS).next();
+            let chall = match chall {
+                Some(chall) => chall,
+                None => return AcmeError::tip(TIP_TYPE_DNS_FAILED),
+            };
+            let (s_id, s_key) = (&cfg.dns_api_sid.as_ref().unwrap(), &cfg.dns_api_key.as_ref().unwrap());
+            let ka = base64_sha256(&key_authorization(&chall.token, &thumbprint));
+            let param = vec![&domain, TYPE_DNS_RR, &ka];
 
-        let well_known_path = _write_to_challenges(chall.token, &domain, &cfg.acme_root, &thumbprint).await?;
+            let record_id = dnsapi::add_record(da, param, &s_id, &s_key).await?;
 
-        let mut attempts: u8 = 0; //轮询challenges
-        loop {
-            let (_nonce, _ok) = _chall_domain(&chall.url, mut_nonce, &account_key_path, &alg, &kid).await?;
-            mut_nonce = _nonce;
-            if _ok {
-                println!("Successful.{}", &chall.url);
-                break;
-            }
-            attempts += 1;
+            mut_nonce = loop_8(&mut mut_nonce, &chall.url, &account_key_path, &alg, &kid).await?;
 
-            if attempts == MAX_TRY {
-                return AcmeError::tip(TIP_MAX_TRY);
-            }
-            let _ = std::thread::sleep(SLEEP_DURATION_SEC_2);
-            debug!("Loop {}/{}, challenges domain", attempts, MAX_TRY);
+            let _ = dnsapi::del_record(da, vec![&domain, &record_id], &s_id, &s_key).await?;
+        } else {
+            info!("Verifying by http type {0}...", domain);
+            let chall = challenges.into_iter().filter(|c| c._type == TYPE_HTTP).next();
+            let chall = match chall {
+                Some(chall) => chall,
+                None => return AcmeError::tip(TIP_TYPE_HTTP_FAILED),
+            };
+
+            let well_known_path = _write_to_challenges(chall.token, &domain, &cfg.acme_root, &thumbprint).await?;
+            mut_nonce = loop_8(&mut mut_nonce, &chall.url, &account_key_path, &alg, &kid).await?;
+            let _ =
+                fs::remove_file(&well_known_path).map_err(|_| AcmeError::Tip(format!("Remove failed: {}", well_known_path)));
         }
-        let _ = fs::remove_file(&well_known_path).map_err(|_| AcmeError::Tip(format!("Remove failed: {}", well_known_path)));
     }
 
     // 4.3 finalize csr
@@ -189,7 +192,7 @@ pub async fn acme_issue(cfg: &AcmeCfg) -> Result<Vec<String>, AcmeError> {
     let (domain_pem, chained_pem) = match cfg.ca.intermediate_url(cfg.domain_alg.is_ecc()) {
         Some(_url) => {
             info!("Download ca intermediate file. Named intermediate.pem");
-            let _intermediate_pem = _http_json(&_url, None, Method::GET).await?.1;
+            let _intermediate_pem = http_json(&_url, None, Method::GET).await?.1;
             (&domain_crt, &format!("{0}\n{1}", &domain_crt, _intermediate_pem))
         }
         None => (&split_cert_chained(&domain_crt)?, &domain_crt),
@@ -199,6 +202,27 @@ pub async fn acme_issue(cfg: &AcmeCfg) -> Result<Vec<String>, AcmeError> {
 
     // 5 备份、复制
     _ssl_and_backup(&cfg.ssl_dir, &cfg.acme_ca_dir)
+}
+
+async fn loop_8(mut_nonce: &mut str, url: &str, account_key_path: &str, alg: &str, kid: &str) -> Result<String, AcmeError> {
+    let mut attempts: u8 = 0; //轮询challenges
+    let mut mut_nonce = mut_nonce.to_string();
+    loop {
+        let (_nonce, _ok) = _chall_domain(&url, mut_nonce, &account_key_path, &alg, &kid).await?;
+        mut_nonce = _nonce;
+        if _ok {
+            println!("Successful.{}", &url);
+            break;
+        }
+        attempts += 1;
+
+        if attempts == MAX_TRY {
+            return AcmeError::tip(TIP_MAX_TRY);
+        }
+        let _ = std::thread::sleep(SLEEP_DURATION_SEC_2);
+        debug!("Loop {}/{}, challenges domain", attempts, MAX_TRY);
+    }
+    Ok(mut_nonce)
 }
 
 fn _ssl_and_backup(ssl_dir: &str, acme_ca_dir: &str) -> Result<Vec<String>, AcmeError> {
@@ -230,47 +254,13 @@ async fn _post_kid(
 ) -> Result<(reqwest::header::HeaderMap, String, u16), AcmeError> {
     let protected = Protected::from_kid(&url, nonce, alg, kid);
     let sig_body = SigBody::from(payload, protected, file_path)?;
-    _http_json(&url, sig_body.to_string()?, Method::POST).await
-}
-async fn _http_json(
-    url: &str,
-    body: Option<String>,
-    method: Method,
-) -> Result<(reqwest::header::HeaderMap, String, u16), AcmeError> {
-    //let params: HashMap<&str, &str> = [("host", h), ("type", "auto")].into_iter().collect();
-    debug!("==> HTTP {:?}: {}\nbody: {:?}", &method, url, &body);
-
-    let client = reqwest::Client::new();
-
-    let cb = match method {
-        Method::GET => client.get(url),
-        Method::HEAD => client.head(url),
-        _ => match body {
-            Some(body) => client.post(url).body(body),
-            _ => client.post(url),
-        },
-    };
-
-    let response = cb
-        .header("Content-Type", CONTENT_TYPE_JSON)
-        .header("User-Agent", USER_AGENT)
-        .timeout(TIMEOUT_SEC_10)
-        .send()
-        .await
-        .map_err(AcmeError::from)?;
-
-    let (c, h) = (response.status().as_u16(), response.headers().clone());
-    debug!("<== Response: {}, header: {:?}", c, response.headers());
-
-    let res = response.text().await?;
-    debug!("<== Response: {}", res);
-    Ok((h, res, c))
+    http_json(&url, sig_body.to_string()?, Method::POST).await
 }
 
 // GET https://acme-v02.api.letsencrypt.org/directory
 // curl https://acme-v02.api.letsencrypt.org/directory -ik
 async fn _directory(url: String) -> Result<Directory, AcmeError> {
-    let res = _http_json(&url, None, Method::GET).await?.1;
+    let res = http_json(&url, None, Method::GET).await?.1;
     trace!("Directory: {}", res);
     let dir: Directory = serde_json::from_str(&res)?;
     Ok(dir)
@@ -293,10 +283,7 @@ fn _get_headers(key: &str, headers: &reqwest::header::HeaderMap) -> Vec<String> 
 }
 
 async fn _new_nonce(url: &str) -> Result<String, AcmeError> {
-    Ok(_get_header(
-        HEADER_REPLAY_NONCE,
-        &_http_json(url, None, Method::HEAD).await?.0,
-    ))
+    Ok(_get_header(HEADER_REPLAY_NONCE, &http_json(url, None, Method::HEAD).await?.0))
 }
 
 async fn _eab_by_email(url: &str, email: &str, acme_ca_dir: &str) -> Result<Option<Eab>, AcmeError> {
@@ -306,7 +293,7 @@ async fn _eab_by_email(url: &str, email: &str, acme_ca_dir: &str) -> Result<Opti
         s
     } else {
         let url = format!("{}?email={}", url, email);
-        let res = _http_json(&url, None, Method::POST).await?.1;
+        let res = http_json(&url, None, Method::POST).await?.1;
         let _ = write_file(&_cache_path, &res.as_bytes())?;
         res
     };
@@ -368,7 +355,7 @@ async fn _new_acct(
     let protected = Protected::from(&url, nonce, alg, jwk);
     let sig_body = SigBody::from(payload, protected, ak_path)?;
 
-    let res = _http_json(&url, sig_body.to_string()?, Method::POST).await?;
+    let res = http_json(&url, sig_body.to_string()?, Method::POST).await?;
     if res.2 > 300 {
         return AcmeError::tip(TIP_ACCOUNT_FAILED);
     }
@@ -410,18 +397,24 @@ async fn _auth_domain(
 
 async fn _write_to_challenges(token: String, domain: &str, acme_dir: &str, thumbprint: &str) -> Result<String, AcmeError> {
     let token = token.replace(r"[^A-Za-z0-9_\-]", "_");
-    let key_authorization = format!("{0}.{1}", token, thumbprint);
+    let key_authorization = key_authorization(&token, thumbprint);
     let well_known_dir = format!("{}{}", acme_dir, DIR_CHALLENGE);
     let _ = create_dir(&well_known_dir);
     let well_known_path = format!("{}{}", well_known_dir, token);
 
     let _ = write_file(&well_known_path, &key_authorization.as_bytes())?;
     let wellknown_url = format!("http://{0}{1}{2}", domain, DIR_CHALLENGE, token);
-    let ka = _http_json(&wellknown_url, None, Method::GET).await?.1; // 自己先验一下
+    let ka = http_json(&wellknown_url, None, Method::GET).await?.1; // 自己先验一下
     if ka != key_authorization {
         return AcmeError::tip(&format!("Check failed: {}", wellknown_url));
     }
     Ok(well_known_path)
+}
+
+fn key_authorization(token: &str, thumbprint: &str) -> String {
+    let token = token.replace(r"[^A-Za-z0-9_\-]", "_");
+    let key_authorization = format!("{0}.{1}", token, thumbprint);
+    key_authorization
 }
 
 async fn _chall_domain(url: &str, nonce: String, file_path: &str, alg: &str, kid: &str) -> Result<(String, bool), AcmeError> {
@@ -715,13 +708,6 @@ struct OrderResChall {
     url: String,
     status: String,
     token: String,
-}
-
-#[derive(Debug)]
-enum Method {
-    POST,
-    GET,
-    HEAD,
 }
 
 #[derive(Deserialize, Debug)]
