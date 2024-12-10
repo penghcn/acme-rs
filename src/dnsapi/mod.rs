@@ -8,8 +8,8 @@ use crate::{crypt::sha256, http_post, AcmeError};
 const ACTION_ADD: &str = "add";
 const ACTION_DEL: &str = "del";
 
-pub mod aliyun;
-pub mod dnspod;
+mod aliyun;
+mod dnspod;
 
 pub async fn add_record(kind: &str, e: Vec<&str>, s_id: &str, s_key: &str) -> Result<String, AcmeError> {
     dispatch_record(kind, ACTION_ADD, e, s_id, s_key).await
