@@ -159,7 +159,7 @@ impl AcmeCfg {
             }
             let dns = crypt::extract_simple_root_domain(dns);
             match dns {
-                Some(d) => [d].to_vec(),
+                Some(d) => [format!("*.{}", &d), d].to_vec(),
                 None => return AcmeError::tip(TIP_INVALID_DNS),
             }
         } else {

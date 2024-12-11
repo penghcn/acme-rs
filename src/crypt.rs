@@ -250,7 +250,7 @@ pub fn extract_simple_root_domain(domain: &str) -> Option<String> {
     // 匹配并提取一级域名，生成泛域名，如*.a.com
     if re.is_match(domain) {
         if let Some(captures) = re.captures(domain) {
-            return captures.get(1).map(|m| format!("*.{}", m.as_str()));
+            return captures.get(1).map(|m| m.as_str().to_string());
         }
     }
     None
