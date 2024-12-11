@@ -247,10 +247,10 @@ pub fn regx(text: &str, reg: &str, need_rep: bool) -> Result<String, AcmeError> 
 
 pub fn extract_simple_root_domain(domain: &str) -> Option<String> {
     let re = Regex::new(r"(?i)(?:^|\.)([a-z0-9-]+\.(com|net|org|io|cn|edu|gov|info|biz|[a-z]{2,})(?:\.[a-z]{2})?)$").unwrap();
-    // 匹配并提取一级域名
+    // 匹配并提取一级域名，生成泛域名，如*.a.com
     if re.is_match(domain) {
         if let Some(captures) = re.captures(domain) {
-            return captures.get(1).map(|m| m.as_str().to_string());
+            return captures.get(1).map(|m| format!("*.{}", m.as_str()));
         }
     }
     None
