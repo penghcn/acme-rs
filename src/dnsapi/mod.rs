@@ -29,7 +29,7 @@ async fn dispatch_record(kind: &str, tp: &str, e: Vec<&str>, s_id: &str, s_key: 
 
 async fn _record<T: UtcHeaderApi3>(t: T, tp: &str, e: Vec<&str>, s_id: &str, s_key: &str) -> Result<String, AcmeError> {
     let cfg = Api3Cfg::new(tp, e, s_id, s_key);
-    let ah3 = Api3Header2::new(t, cfg);
+    let ah3 = Api3Header::new(t, cfg);
     let action = ah3.action();
     let del = action.0 .0;
 
@@ -100,14 +100,14 @@ impl Api3Cfg {
     }
 }
 
-struct Api3Header2<T> {
+struct Api3Header<T> {
     inner: T,
     cfg: Api3Cfg,
 }
 
-impl<T> Api3Header2<T> {
+impl<T> Api3Header<T> {
     fn new(inner: T, cfg: Api3Cfg) -> Self {
-        Api3Header2 { inner, cfg }
+        Api3Header { inner, cfg }
     }
     fn url(&self) -> String
     where
@@ -130,6 +130,7 @@ impl<T> Api3Header2<T> {
         self.inner.parse_record_id(&res)
     }
 
+    // https://help.aliyun.com/zh/sdk/product-overview/v3-request-structure-and-signature?spm=a2c4g.11186623.0.0.59bc3261dt29Ly
     fn to_authorization(&self, e: (&'static str, &'static str, String)) -> BTreeMap<&str, String>
     where
         T: UtcHeaderApi3,

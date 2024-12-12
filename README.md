@@ -37,7 +37,7 @@ cargo run --  dns=ai8.rs,www.ai8.rs dir=/www/ai8.rs ca=g email=a@a.rs alg=rsa4 e
 
 Use dns api, wildcard domain names like *.a.com are supported
 ```
-cargo run --  dns=ai8.rs dir=/www/ai8.rs da=ali da_sid=... da_key=...
+cargo run --  dns="*.ai8.rs" dir=/www/ai8.rs da=ali da_sid=... da_key=...
 ```
 
 3) For more parameter configurations, please refer to the following.
