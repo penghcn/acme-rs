@@ -1,5 +1,5 @@
-use acme_rs::{simple_cron, AcmeCfg, AcmeLogger};
-use log::{error, info, LevelFilter};
+use acme_rs::{AcmeCfg, AcmeLogger, simple_cron};
+use log::{LevelFilter, error, info};
 use std::{env, process};
 
 // acme规范参考 https://datatracker.ietf.org/doc/html/rfc8555#section-7.2
@@ -8,8 +8,8 @@ async fn main() {
     //set log
     log::set_boxed_logger(Box::new(AcmeLogger)).unwrap();
     log::set_max_level(LevelFilter::Info);
-    // cargo test --test acme -- _acme --exact --show-output  dns=ai8.rs,www.ai8.rs dir=/www/ai8.rs email=a@a.org ca=z
-    // cargo run --  dns=ai8.rs,www.ai8.rs dir=/www/ai8.rs ca=z email=a@a.rs alg=rsa4
+    // cargo test --test acme -- _acme --exact --show-output  dns=lellm.com,www.lellm.com dir=/www/lellm.com email=a@lellm.com ca=z
+    // cargo run --  dns=lellm.com,www.lellm.com dir=/Users/pengh/www/ssl/lellm.com ca=z email=a@lellm.com alg=rsa4
     let args: Vec<String> = env::args().skip(1).collect(); // 获取所有的命令行参数，跳过第一个参数（程序路径）
     info!("Get args: {:?}", &args);
 

@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use chrono::Utc;
 use regex::Regex;
 
-use crate::{crypt::sha256, http_post, AcmeError};
+use crate::{AcmeError, crypt::sha256, http_post};
 
 const ACTION_ADD: &str = "add";
 const ACTION_DEL: &str = "del";
@@ -31,7 +31,7 @@ async fn _record<T: UtcHeaderApi3>(t: T, tp: &str, e: Vec<&str>, s_id: &str, s_k
     let cfg = Api3Cfg::new(tp, e, s_id, s_key);
     let ah3 = Api3Header::new(t, cfg);
     let action = ah3.action();
-    let del = action.0 .0;
+    let del = action.0.0;
 
     let res = http_post(&ah3.url(), action.1, ah3.to_authorization(action.0)).await?;
     if res.2 == 400 || res.2 == 401 {

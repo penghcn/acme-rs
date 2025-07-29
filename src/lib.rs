@@ -4,7 +4,7 @@ mod dnsapi;
 
 use acme::acme_issue;
 use chrono::{Duration as ChronoDuration, Local, NaiveDateTime, TimeZone};
-use log::{debug, error, info, Level, LevelFilter, Log, Record};
+use log::{Level, LevelFilter, Log, Record, debug, error, info};
 
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::Deserialize;
@@ -87,7 +87,12 @@ pub async fn simple_cron(cfg: &AcmeCfg) -> Result<(), AcmeError> {
     //     interval.tick().await;
     //     let _ = acme_issue3(&cfg).await;
     // }
-    _simple_cron(cfg, CRON_DEFAULT_DAYS, CRON_DEFAULT_HOUR).await
+    if cfg.is_cron {
+        _simple_cron(cfg, CRON_DEFAULT_DAYS, CRON_DEFAULT_HOUR).await
+    } else {
+        _acme_issue3(&cfg).await;
+        Ok(())
+    }
 }
 
 pub struct AcmeLogger;
@@ -136,12 +141,14 @@ pub struct AcmeCfg {
     dns_api: Option<String>,
     dns_api_sid: Option<String>,
     dns_api_key: Option<String>,
+    is_cron: bool,
 }
 
 impl AcmeCfg {
     pub fn new(args: &[String]) -> Result<Self, AcmeError> {
         let map: HashMap<&str, &str> = args.iter().filter_map(|arg| arg.split_once('=')).collect();
 
+        let is_cron = map.get("cron").is_some();
         let dns_api = map.get("da").map(|s| s.to_string());
 
         let dns_api_sid = map.get("da_sid").map(|s| s.to_string());
@@ -223,6 +230,7 @@ impl AcmeCfg {
             dns_api,
             dns_api_sid,
             dns_api_key,
+            is_cron,
         })
     }
 }

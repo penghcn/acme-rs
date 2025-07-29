@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use crate::crypt::{hex_hmac256, hmac256};
 
-use super::{UtcHeaderApi3, ACTION_ADD};
+use super::{ACTION_ADD, UtcHeaderApi3};
 
 const CONTENT_TYPE_JSON: &str = "application/json";
 
@@ -39,8 +39,10 @@ impl UtcHeaderApi3 for DnsPod {
             (
                 RECORD_ADD,
                 VERSION,
-                format!("{{\"Domain\":\"{}\",\"SubDomain\":\"{}\",\"Value\":\"{}\",\"RecordType\":\"TXT\",\"RecordLine\":\"默认\"}}", 
-                e[0], e[1], e[2]),
+                format!(
+                    "{{\"Domain\":\"{}\",\"SubDomain\":\"{}\",\"Value\":\"{}\",\"RecordType\":\"TXT\",\"RecordLine\":\"默认\"}}",
+                    e[0], e[1], e[2]
+                ),
             )
         } else {
             (

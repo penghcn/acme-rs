@@ -4,7 +4,7 @@ use chrono::Utc;
 
 use crate::crypt::hex_hmac256;
 
-use super::{UtcHeaderApi3, ACTION_ADD};
+use super::{ACTION_ADD, UtcHeaderApi3};
 
 const CONTENT_TYPE_FORM: &str = "application/x-www-form-urlencoded";
 

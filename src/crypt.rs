@@ -1,4 +1,4 @@
-use base64::{engine::general_purpose::URL_SAFE, Engine as _};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE};
 use hmac::{Hmac, Mac};
 use log::{debug, trace, warn};
 use regex::Regex;
@@ -9,7 +9,7 @@ use std::{
     process::{Command, Stdio},
 };
 
-use crate::{write_file, AcmeError, Alg, CERT_BEGIN, CERT_REGEX, DOMAIN_KEY, ISSUER_REGEX, TIP_REGEX_FAILED};
+use crate::{AcmeError, Alg, CERT_BEGIN, CERT_REGEX, DOMAIN_KEY, ISSUER_REGEX, TIP_REGEX_FAILED, write_file};
 
 pub fn base64_hmac256(key: &str, s: &str) -> String {
     type HmacSha256 = Hmac<Sha256>;
